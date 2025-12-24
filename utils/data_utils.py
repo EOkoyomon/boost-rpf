@@ -6,7 +6,10 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 
 import networkx as nx
 import numpy as np
+import pandas as pd
 import torch
+from darts import TimeSeries
+from scipy.sparse import find
 from torch.utils.data import random_split
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
@@ -173,6 +176,274 @@ def get_pyg_graphs(data_dir, grid_type):
     pyg_dataset = torch.load(dataset_path, weights_only=False)
     pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
     return pyg_dataset
+
+
+def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=-150.0):
+    """
+    Extract all root-to-node paths from a single PyG data sample and compute features.
+    
+    This function implements the following methodology:
+    1. Backward Power Accumulation: Compute P_agg and Q_agg for each node
+    2. LinDistFlow Baseline: Compute V_LDF and theta_LDF sequentially
+    3. Graph-to-Path Conversion: Extract paths from slack to every non-slack node
+    
+    Args:
+        data: PyTorch Geometric Data object with ppci attribute (raw, untransformed)
+        slack_index (int): Index of the slack bus (usually 0)
+        slack_vm_pu (float): Voltage magnitude at slack bus in p.u.
+        slack_va_degree (float): Voltage angle at slack bus in degrees
+        
+    Returns:
+        list of dict: Each dict contains:
+            - 'path': list of node indices from slack to target node
+            - 'features': np.array of shape (path_length, 10) with feature vectors
+            - 'targets': np.array of shape (path_length, 2) with [V_j, theta_j]
+            - 'target_node': the final node in the path
+    """
+    # 1. Extract Data from Source (following calculate_distflow_iterative)
+    Ybus = data.ppci["Ybus"].copy()
+    
+    # ppci Sbus is Net Injection. We need Net Load.
+    Sbus = -1 * data.ppci["Sbus"].copy()
+    num_ppci_nodes = Sbus.shape[0]
+    num_pyg_nodes = len(data.x)
+    
+    P_load = Sbus.real
+    Q_load = Sbus.imag
+    
+    # Get ground truth voltages from y labels
+    # y format: [p_mw, q_mvar, vm_pu, va_degree]
+    V_true = data.y[:, 2].numpy()  # vm_pu
+    theta_true = data.y[:, 3].numpy()  # va_degree
+    
+    # 2. Build Network Graph from Ybus
+    G = nx.DiGraph()
+    G.add_nodes_from(range(num_ppci_nodes))
+    rows, cols, vals = find(Ybus)
+    
+    for r, c, val in zip(rows, cols, vals):
+        if r != c:  # Off-diagonal elements represent branches
+            z_pu = -1.0 / val  # Z = -1/Y for off-diagonal
+            G.add_edge(r, c, r=z_pu.real, x=z_pu.imag)
+    
+    # 3. Build paths from slack to all nodes
+    try:
+        paths = nx.shortest_path(G, source=slack_index)
+    except nx.NetworkXNoPath:
+        bfs_tree = nx.bfs_tree(G, source=slack_index)
+        paths = nx.shortest_path(bfs_tree, source=slack_index)
+    
+    # Pre-fetch edge attributes
+    edge_r = nx.get_edge_attributes(G, 'r')
+    edge_x = nx.get_edge_attributes(G, 'x')
+    
+    # 4. Backward Sweep - Compute aggregated power (P_agg, Q_agg)
+    sorted_nodes = sorted(paths.keys(), key=lambda n: len(paths[n]))
+    P_agg = P_load.copy()
+    Q_agg = Q_load.copy()
+    
+    # Map each node to its parent
+    parents = {}
+    for node in paths:
+        if node != slack_index:
+            parents[node] = paths[node][-2]
+    
+    # Iterate from leaves to root (backward sweep)
+    for node in sorted_nodes[::-1]:
+        if node == slack_index:
+            continue
+        parent = parents[node]
+        P_agg[parent] += P_agg[node]
+        Q_agg[parent] += Q_agg[node]
+    
+    # 5. Forward Sweep - Compute LinDistFlow baseline voltages
+    V_LDF = np.zeros(num_ppci_nodes)
+    V_LDF[slack_index] = slack_vm_pu
+    
+    theta_LDF = np.zeros(num_ppci_nodes)
+    theta_LDF[slack_index] = np.deg2rad(slack_va_degree)
+    
+    # Store computed values for each node during forward sweep
+    for node in sorted_nodes:
+        if node == slack_index:
+            continue
+        
+        parent = parents[node]
+        
+        # Get branch impedance
+        if (parent, node) in edge_r:
+            r_ij = edge_r[(parent, node)]
+            x_ij = edge_x[(parent, node)]
+        elif (node, parent) in edge_r:
+            r_ij = edge_r[(node, parent)]
+            x_ij = edge_x[(node, parent)]
+        else:
+            r_ij = 0.0
+            x_ij = 0.0
+        
+        # LinDistFlow equations from methodology:
+        # V_j ≈ V_i - (r_ij * P_agg_j + x_ij * Q_agg_j) / V_0
+        # theta_j ≈ theta_i - (x_ij * P_agg_j - r_ij * Q_agg_j) / V_0^2
+        V_LDF[node] = V_LDF[parent] - (r_ij * P_agg[node] + x_ij * Q_agg[node]) / slack_vm_pu
+        theta_LDF[node] = theta_LDF[parent] - (x_ij * P_agg[node] - r_ij * Q_agg[node]) / (slack_vm_pu ** 2)
+
+    theta_LDF_deg = np.rad2deg(theta_LDF)
+    
+    # 6. Extract paths for each non-slack node (up to num_pyg_nodes)
+    path_data_list = []
+    
+    for target_node in range(1, num_pyg_nodes):  # Skip slack (node 0)
+        if target_node not in paths:
+            continue
+            
+        path = paths[target_node]  # [slack, ..., parent, target_node]
+        path_length = len(path)
+        
+        # Build feature vectors for each step in the path
+        # Feature vector: [V_i, theta_i, r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
+        features = np.zeros((path_length - 1, 10))  # Exclude slack from features
+        targets = np.zeros((path_length - 1, 2))  # [V_j, theta_j]
+        
+        for step_idx, j in enumerate(path[1:]):  # Start from first child of slack
+            i = path[step_idx]  # Parent node
+            
+            # Get branch impedance (i -> j)
+            if (i, j) in edge_r:
+                r_ij = edge_r[(i, j)]
+                x_ij = edge_x[(i, j)]
+            elif (j, i) in edge_r:
+                r_ij = edge_r[(j, i)]
+                x_ij = edge_x[(j, i)]
+            else:
+                r_ij = 0.0
+                x_ij = 0.0
+            
+            # Parent voltage (use true values for training)
+            if i < num_pyg_nodes:
+                V_i = V_true[i]
+                theta_i = theta_true[i]
+            else:
+                # For extra ppci nodes, use LinDistFlow estimate
+                V_i = V_LDF[i]
+                theta_i = theta_LDF_deg[i]
+            
+            # Build feature vector
+            features[step_idx, 0] = V_i  # Parent voltage magnitude
+            features[step_idx, 1] = theta_i  # Parent voltage angle
+            features[step_idx, 2] = r_ij  # Branch resistance
+            features[step_idx, 3] = x_ij  # Branch reactance
+            features[step_idx, 4] = P_load[j]  # Local P injection
+            features[step_idx, 5] = Q_load[j]  # Local Q injection
+            features[step_idx, 6] = P_agg[j]  # Aggregated P
+            features[step_idx, 7] = Q_agg[j]  # Aggregated Q
+            features[step_idx, 8] = V_LDF[j]  # LinDistFlow V estimate
+            features[step_idx, 9] = theta_LDF_deg[j]  # LinDistFlow theta estimate
+            
+            # Target: true voltage at node j
+            if j < num_pyg_nodes:
+                targets[step_idx, 0] = V_true[j]
+                targets[step_idx, 1] = theta_true[j]
+            else:
+                # For extra ppci nodes (shouldn't happen if j < num_pyg_nodes)
+                targets[step_idx, 0] = V_LDF[j]
+                targets[step_idx, 1] = theta_LDF_deg[j]
+        
+        path_data_list.append({
+            'path': path,
+            'features': features,
+            'targets': targets,
+            'target_node': target_node
+        })
+    
+    return path_data_list
+
+
+def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.0):
+    """
+    Load grid data and convert to sequential path format for darts time series training.
+    
+    This function transforms graph-based power flow data into sequences of feature vectors
+    along paths from the slack bus to each node, following the methodology for recursive
+    voltage prediction.
+    
+    Args:
+        data_dir (str): Base directory where datasets are stored.
+        grid_type (str): The type of sb grid (e.g., '1-LV-rural1--1-no_sw', '1-MV-urban--1-no_sw', etc.)
+        slack_vm_pu (float): Voltage magnitude at slack bus in p.u. Default 1.025.
+        slack_va_degree (float): Voltage angle at slack bus in degrees. Default -150.0.
+    
+    Returns:
+        list of dict: Each dict represents one network sample and contains:
+            - 'grid_type': str, the grid type identifier
+            - 'sample_idx': int, index of this sample in the original dataset
+            - 'paths': list of dict, each containing:
+                - 'target_series': darts.TimeSeries with targets [V_j, theta_j]
+                - 'covariate_series': darts.TimeSeries with features (past_covariates)
+                - 'path': list of node indices
+                - 'target_node': int, the final node in the path
+    
+    Feature vector (covariates) for each step j in path:
+        [V_i, theta_i, r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
+    
+    Target vector for each step j in path:
+        [V_j, theta_j]
+    """
+    # Load raw dataset (without transformation)
+    dataset_path = os.path.join(data_dir, grid_type, 'train', 'dataset_with_ppci.pt')
+    raw_dataset = torch.load(dataset_path, weights_only=False)
+    
+    # Feature and target column names for darts TimeSeries
+    feature_names = [
+        'V_i', 'theta_i', 'r_ij', 'x_ij', 
+        'P_j', 'Q_j', 'P_agg_j', 'Q_agg_j',
+        'V_LDF_j', 'theta_LDF_j'
+    ]
+    target_names = ['V_j', 'theta_j']
+    
+    # Process each sample in the dataset
+    all_samples = []
+    
+    for sample_idx, data in enumerate(raw_dataset):
+        # Extract paths from this sample
+        path_data_list = _extract_paths_from_sample(
+            data, 
+            slack_index=0,
+            slack_vm_pu=slack_vm_pu,
+            slack_va_degree=slack_va_degree
+        )
+        
+        # Convert to darts TimeSeries format
+        sample_paths = []
+        
+        for path_data in path_data_list:
+            features = path_data['features']
+            targets = path_data['targets']
+            
+            # Create DataFrames for darts
+            # Using integer index as "time" (step along path)
+            df_features = pd.DataFrame(features, columns=feature_names)
+            df_targets = pd.DataFrame(targets, columns=target_names)
+            
+            # Create TimeSeries objects
+            # For sequence prediction, we treat path position as the time dimension
+            covariate_series = TimeSeries.from_dataframe(df_features)
+            target_series = TimeSeries.from_dataframe(df_targets)
+            
+            sample_paths.append({
+                'target_series': target_series,
+                'covariate_series': covariate_series,
+                'path': path_data['path'],
+                'target_node': path_data['target_node']
+            })
+        
+        all_samples.append({
+            'grid_type': grid_type,
+            'sample_idx': sample_idx,
+            'paths': sample_paths
+        })
+    
+    return all_samples
+
 
 def create_complex_features(dataset):
     """

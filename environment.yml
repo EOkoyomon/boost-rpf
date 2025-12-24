@@ -6,6 +6,7 @@ dependencies:
   - python=3.10.16
   - pip:
       - complexPyTorch==0.4
+      - darts==0.40.0
       - hydra-core==1.3.2
       - ipykernel==6.29.5
       - jaxlib==0.4.38
