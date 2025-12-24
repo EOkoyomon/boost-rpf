@@ -1,0 +1,9 @@
+__pycache__/
+data/*
+!data/nOPF_*
+data_symmetrized/*
+!data_symmetrized/nOPF_*
+out/
+utils/explore.py
+debugging/
+results/
