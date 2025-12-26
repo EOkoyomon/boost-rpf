@@ -177,7 +177,6 @@ def get_pyg_graphs(data_dir, grid_type):
     pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
     return pyg_dataset
 
-
 def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=-150.0):
     """
     Extract all root-to-node paths from a single PyG data sample and compute features.
@@ -186,6 +185,11 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     1. Backward Power Accumulation: Compute P_agg and Q_agg for each node
     2. LinDistFlow Baseline: Compute V_LDF and theta_LDF sequentially
     3. Graph-to-Path Conversion: Extract paths from slack to every non-slack node
+    
+    Note: V_i and theta_i (parent voltage) are NOT included in covariates.
+    Instead, the model uses lags on the target series to access previous voltage.
+    This ensures clean separation between training (uses true lags) and testing
+    (uses predicted lags via recursive prediction).
     
     Args:
         data: PyTorch Geometric Data object with ppci attribute (raw, untransformed)
@@ -196,7 +200,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     Returns:
         list of dict: Each dict contains:
             - 'path': list of node indices from slack to target node
-            - 'features': np.array of shape (path_length, 10) with feature vectors
+            - 'features': np.array of shape (path_length, 8) with feature vectors
             - 'targets': np.array of shape (path_length, 2) with [V_j, theta_j]
             - 'target_node': the final node in the path
     """
@@ -297,54 +301,52 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
             continue
             
         path = paths[target_node]  # [slack, ..., parent, target_node]
+        
+        # Include slack in the sequence so we have a "previous" value for the first child
+        # The sequence is: slack -> child1 -> child2 -> ... -> target_node
+        # Target at step 0 is slack voltage, target at step 1 is child1 voltage, etc.
         path_length = len(path)
         
-        # Build feature vectors for each step in the path
-        # Feature vector: [V_i, theta_i, r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
-        features = np.zeros((path_length - 1, 10))  # Exclude slack from features
-        targets = np.zeros((path_length - 1, 2))  # [V_j, theta_j]
+        # Build feature vectors for each step in the path (including slack)
+        # Feature vector: [r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
+        # Note: V_i, theta_i are NOT included - they come from target lags
+        features = np.zeros((path_length, 8))
+        targets = np.zeros((path_length, 2))  # [V_j, theta_j]
         
-        for step_idx, j in enumerate(path[1:]):  # Start from first child of slack
-            i = path[step_idx]  # Parent node
-            
-            # Get branch impedance (i -> j)
-            if (i, j) in edge_r:
-                r_ij = edge_r[(i, j)]
-                x_ij = edge_x[(i, j)]
-            elif (j, i) in edge_r:
-                r_ij = edge_r[(j, i)]
-                x_ij = edge_x[(j, i)]
-            else:
+        for step_idx, j in enumerate(path):
+            if step_idx == 0:
+                # Slack bus: no branch to it, just its properties
                 r_ij = 0.0
                 x_ij = 0.0
-            
-            # Parent voltage (use true values for training)
-            if i < num_pyg_nodes:
-                V_i = V_true[i]
-                theta_i = theta_true[i]
             else:
-                # For extra ppci nodes, use LinDistFlow estimate
-                V_i = V_LDF[i]
-                theta_i = theta_LDF_deg[i]
-            
-            # Build feature vector
-            features[step_idx, 0] = V_i  # Parent voltage magnitude
-            features[step_idx, 1] = theta_i  # Parent voltage angle
-            features[step_idx, 2] = r_ij  # Branch resistance
-            features[step_idx, 3] = x_ij  # Branch reactance
-            features[step_idx, 4] = P_load[j]  # Local P injection
-            features[step_idx, 5] = Q_load[j]  # Local Q injection
-            features[step_idx, 6] = P_agg[j]  # Aggregated P
-            features[step_idx, 7] = Q_agg[j]  # Aggregated Q
-            features[step_idx, 8] = V_LDF[j]  # LinDistFlow V estimate
-            features[step_idx, 9] = theta_LDF_deg[j]  # LinDistFlow theta estimate
+                i = path[step_idx - 1]  # Parent node
+                # Get branch impedance (i -> j)
+                if (i, j) in edge_r:
+                    r_ij = edge_r[(i, j)]
+                    x_ij = edge_x[(i, j)]
+                elif (j, i) in edge_r:
+                    r_ij = edge_r[(j, i)]
+                    x_ij = edge_x[(j, i)]
+                else:
+                    r_ij = 0.0
+                    x_ij = 0.0
+
+            # Build feature vector (no parent voltage - that comes from lags)
+            features[step_idx, 0] = r_ij  # Branch resistance
+            features[step_idx, 1] = x_ij  # Branch reactance
+            features[step_idx, 2] = P_load[j]  # Local P injection
+            features[step_idx, 3] = Q_load[j]  # Local Q injection
+            features[step_idx, 4] = P_agg[j]  # Aggregated P
+            features[step_idx, 5] = Q_agg[j]  # Aggregated Q
+            features[step_idx, 6] = V_LDF[j]  # LinDistFlow V estimate
+            features[step_idx, 7] = theta_LDF_deg[j]  # LinDistFlow theta estimate
             
             # Target: true voltage at node j
             if j < num_pyg_nodes:
                 targets[step_idx, 0] = V_true[j]
                 targets[step_idx, 1] = theta_true[j]
             else:
-                # For extra ppci nodes (shouldn't happen if j < num_pyg_nodes)
+                # For extra ppci nodes (shouldn't happen)
                 targets[step_idx, 0] = V_LDF[j]
                 targets[step_idx, 1] = theta_LDF_deg[j]
         
@@ -383,7 +385,9 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
                 - 'target_node': int, the final node in the path
     
     Feature vector (covariates) for each step j in path:
-        [V_i, theta_i, r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
+        [r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
+    
+    Note: V_i, theta_i (parent voltage) are NOT in covariates - they come from target lags.
     
     Target vector for each step j in path:
         [V_j, theta_j]
@@ -393,8 +397,9 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
     raw_dataset = torch.load(dataset_path, weights_only=False)
     
     # Feature and target column names for darts TimeSeries
+    # Note: V_i, theta_i are NOT included - they come from target lags
     feature_names = [
-        'V_i', 'theta_i', 'r_ij', 'x_ij', 
+        'r_ij', 'x_ij', 
         'P_j', 'Q_j', 'P_agg_j', 'Q_agg_j',
         'V_LDF_j', 'theta_LDF_j'
     ]
@@ -439,6 +444,7 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
         all_samples.append({
             'grid_type': grid_type,
             'sample_idx': sample_idx,
+            'num_nodes': len(data.x),
             'paths': sample_paths
         })
     
@@ -505,13 +511,14 @@ def create_complex_features(dataset):
 
     return complex_dataset
 
-def get_dataset(data_dir, grid_types, complex=False):
+def get_dataset(data_dir, grid_types, complex=False, paths=False):
     """
     Load and cache datasets for the specified grid types.
     Args:
         data_dir (str): Base directory where datasets are stored.
         grid_types (list of str): List of grid types to load.
         complex (bool): Whether to load complex datasets.
+        paths (bool): Whether to load path-based datasets.
 
     Returns:
         list of torch_geometric.data.Data: Combined list of PyTorch Geometric Data objects from all specified grid types.
@@ -519,13 +526,17 @@ def get_dataset(data_dir, grid_types, complex=False):
     complete_dataset = []
     for grid in grid_types:
         pyg_dataset = None
-        id = (grid, "complex" if complex else "real")
+        id = (grid, "complex" if complex else "real", "paths" if paths else "graphs")
         if id in DATASET_CACHE:
             pyg_dataset = DATASET_CACHE[id]
         else:
             print('Cache miss:', id, '... fetching')
-            pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
-            DATASET_CACHE[(grid, "real")] = pyg_dataset # Cache real dataset
+            if paths:
+                pyg_dataset = get_grid_paths(data_dir, grid) # Fetch real dataset
+                DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset # Cache real dataset
+            else:
+                pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
+                DATASET_CACHE[(grid, "real", "graphs")] = pyg_dataset # Cache real dataset
             if complex:
                 pyg_dataset = create_complex_features(pyg_dataset) # Convert to complex dataset
                 DATASET_CACHE[id] = pyg_dataset # Cache complex dataset
@@ -537,7 +548,8 @@ def get_dataloaders(data_dir,
                     training_grids,
                     testing_grid=None,
                     batch_size=16,
-                    complex=False):
+                    complex=False,
+                    paths=False):
     """
     Get PyTorch DataLoaders for training, validation, and testing.
     Args:
@@ -546,21 +558,25 @@ def get_dataloaders(data_dir,
         testing_grid (str or None): Grid type to use for testing. If None, a portion of training data is used for testing.
         batch_size (int): Batch size for the DataLoaders.
         complex (bool): Whether to load complex datasets.
+        paths (bool): Whether to load path-based datasets.
 
     Returns:
-        tuple: (loader_train, loader_val, loader_test) DataLoaders for training, validation, and testing.
+        tuple: (loader_train, loader_val, loader_test) DataLoaders or dictionaries with darts TimeSeries for training, validation, and testing.
     """
-    train_dataset = get_dataset(data_dir, training_grids, complex=complex)
+    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths)
 
     if testing_grid:
         # Out of distribution test on left over grid
         train_val_split = [0.75, 0.15]
         train_val_split = [x / sum(train_val_split) for x in train_val_split] # Redistribute to sum to 1
         train_split, val_split = random_split(train_dataset, train_val_split)
-        test_split = get_dataset(data_dir, [testing_grid], complex=complex)
+        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths)
     else:
         train_val_test_split = [0.75, 0.15, 0.10]
         train_split, val_split, test_split = random_split(train_dataset, train_val_test_split)
+
+    if paths:
+        return train_split, val_split, test_split
 
     loader_train = DataLoader(train_split,
                               batch_size=batch_size,
