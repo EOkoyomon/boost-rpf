@@ -1,6 +1,6 @@
 import numpy as np
 import torch
-from torch_sparse import SparseTensor
+# from torch_sparse import SparseTensor
 
 def extract_pandapower_matrices(ppci):
     """Extract matrices from a single pandapower network."""

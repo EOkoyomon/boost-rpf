@@ -589,6 +589,10 @@ class XGBModelWrapper:
         sorted_paths = sorted(paths, key=lambda p: len(p['path']))
         predictions = np.ones((num_nodes, 2))
 
+        # Initialize slack voltage from the first path's target series
+        slack_voltage = paths[0]['target_series'][0].values().flatten()
+        predictions[0] = slack_voltage
+
         for path_info in sorted_paths:
             path = path_info['path']
             target_node = path_info['target_node']
