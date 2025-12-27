@@ -4,6 +4,8 @@ import warnings
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
 
+import pickle
+
 import networkx as nx
 import numpy as np
 import pandas as pd
@@ -14,6 +16,7 @@ from torch.utils.data import random_split
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import to_networkx
+from tqdm import tqdm
 
 DATASET_CACHE = {}
 
@@ -438,7 +441,8 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
                 'target_series': target_series,
                 'covariate_series': covariate_series,
                 'path': path_data['path'],
-                'target_node': path_data['target_node']
+                'target_node': path_data['target_node'],
+                'true_voltages': data.y[:, 2:4].numpy()
             })
         
         all_samples.append({
@@ -448,6 +452,76 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
             'paths': sample_paths
         })
     
+    return all_samples
+
+
+def load_precomputed_paths(data_dir, grid_type):
+    """
+    Load pre-computed path data from disk and convert to TimeSeries format.
+
+    This is much faster than get_grid_paths() because the expensive path extraction
+    and feature computation is already done. Only TimeSeries creation happens here.
+
+    Args:
+        data_dir (str): Base directory where datasets are stored.
+        grid_type (str): The type of grid (e.g., '1-LV-rural1--1-no_sw')
+
+    Returns:
+        list of dict: Same format as get_grid_paths() output.
+
+    Raises:
+        FileNotFoundError: If pre-computed data doesn't exist. Run precompute_paths.py first.
+    """
+    # Load pre-computed data
+    precomputed_path = os.path.join(data_dir, grid_type, 'train', 'dataset_sequential.pkl')
+
+    if not os.path.exists(precomputed_path):
+        raise FileNotFoundError(
+            f"Pre-computed path data not found at {precomputed_path}. "
+            f"Run 'python precompute_paths.py --data_dir {data_dir}' first."
+        )
+
+    with open(precomputed_path, 'rb') as f:
+        save_data = pickle.load(f)
+
+    feature_names = save_data['feature_names']
+    target_names = save_data['target_names']
+    samples = save_data['samples']
+
+    # Convert numpy arrays to TimeSeries
+    all_samples = []
+
+    for sample in tqdm(samples):
+        sample_paths = []
+
+        for path_data in sample['paths']:
+            # # Create DataFrames for darts
+            # df_features = pd.DataFrame(path_data['features'], columns=feature_names)
+            # df_targets = pd.DataFrame(path_data['targets'], columns=target_names)
+
+            # # Create TimeSeries objects
+            # covariate_series = TimeSeries.from_dataframe(df_features)
+            # target_series = TimeSeries.from_dataframe(df_targets)
+
+            # Create TimesSeries objects from numpy arrays
+            covariate_series = TimeSeries.from_values(path_data['features'])
+            target_series = TimeSeries.from_values(path_data['targets'])
+
+            sample_paths.append({
+                'target_series': target_series,
+                'covariate_series': covariate_series,
+                'path': path_data['path'],
+                'target_node': path_data['target_node'],
+            })
+
+        all_samples.append({
+            'grid_type': sample['grid_type'],
+            'sample_idx': sample['sample_idx'],
+            'num_nodes': sample['num_nodes'],
+            'paths': sample_paths,
+            'true_voltages': sample['true_voltages'],
+        })
+
     return all_samples
 
 
@@ -532,8 +606,15 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False):
         else:
             print('Cache miss:', id, '... fetching')
             if paths:
-                pyg_dataset = get_grid_paths(data_dir, grid) # Fetch real dataset
-                DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset # Cache real dataset
+                # Try to load pre-computed paths first (fast), fall back to computing (slow)
+                try:
+                    pyg_dataset = load_precomputed_paths(data_dir, grid)
+                    print(f'  Loaded pre-computed paths for grid {grid}.')
+                except FileNotFoundError:
+                    print(f'  Pre-computed paths not found, computing (slow)...')
+                    print(f'  Hint: Run "python precompute_paths.py --data_dir {data_dir}" to speed up future loads.')
+                    pyg_dataset = get_grid_paths(data_dir, grid)
+                DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset
             else:
                 pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
                 DATASET_CACHE[(grid, "real", "graphs")] = pyg_dataset # Cache real dataset

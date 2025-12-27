@@ -1,8 +1,8 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.utils.data
-from torch_scatter import scatter_add
+# import torch.utils.data
+# from torch_scatter import scatter_add
 import matplotlib.pyplot as plt
 import simbench as sb
 from tqdm import tqdm
@@ -36,11 +36,12 @@ def get_model_save_path(log_dir, model_id='0'):
     """
     return os.path.join(log_dir, f'model_weights_{model_id}')
 
-def setup_pytorch():
+def setup_seeds():
     """
     Set random seeds for reproducibility.
     """
     torch.manual_seed(12)
+    np.random.seed(12)
     return
 
 def get_device():
@@ -121,168 +122,6 @@ def normalized_mse_loss(pred, target, eps=1e-8):
     weighted_mse = weights * mse  # Broadcasting over (N, D)
     # Return the mean loss across all elements
     return weighted_mse.mean()
-
-def physics_loss_vectorized(data, predictions):
-    """
-    Compute physics-informed loss based on AC power flow equations.
-
-    Fully vectorized physics-informed loss. Instead of using for-loops, this is 
-    optimized using torch_scatter for all aggregation operations instead of for-loops,
-    making it much faster for batched training.
-
-    This function computes AC power flow physics loss for a dataset where:
-    - The slack bus has been removed from the graph structure
-    - Only PQ buses remain as nodes
-    - Only PQ-PQ edges remain
-    - Slack bus information is embedded in global attributes
-    - Missing PQ-slack connections must be reconstructed using global slack impedance
-    
-    Uses the nodal power injection convention: P_injection = P_generation - P_load
-    Implements correct AC power flow equations with self-admittance terms (π-model):
-    P_i = -V_i² * G_ii + Σ_j V_i * V_j * (G_ij * cos(θ_i - θ_j) + B_ij * sin(θ_i - θ_j))
-    
-    Args:
-        data: PyTorch Geometric Data object (transformed) containing:
-            - x: Node features [p_mw, q_mvar, hops_to_slack] (3 features after transformation)
-                Shape: [num_pq_buses, 3]
-            - edge_index: Edge connectivity for PQ-PQ connections [2, num_pq_edges]  
-            - edge_attr: Simplified edge attributes [r_pu, x_pu] for PQ-PQ connections
-                Shape: [num_pq_edges, 2]
-            - slack_info: Global slack connection info [slack_vm_pu, slack_va_degree, slack_r_pu, slack_x_pu]
-                Shape: [4] or [batch_size*4] for batched data
-            - net: Original (solved) pandapower network object for reference
-        predictions: Predicted voltages [vm_pu, va_degree] for PQ buses only
-            Shape: [num_pq_buses, 2]
-    
-    Returns:
-        torch.Tensor: Physics-informed loss scalar
-        
-    Note:
-        - Only adds slack interactions to buses with hops_to_slack == 1 (directly connected)
-        - Uses correct sign convention for nodal power injections
-        - Uses torch_scatter for vectorized aggregation operations
-    """
-    
-    # Extract predicted voltages for PQ buses
-    V_pred = predictions[:, 0]  # Voltage magnitudes (p.u.)
-    theta_pred_deg = predictions[:, 1]  # Voltage angles (degrees)
-    theta_pred_rad = theta_pred_deg * torch.pi / 180.0  # Convert to radians
-    
-    num_pq_buses = len(V_pred)
-    
-    # Extract slack bus reference values from global attributes
-    # Handle batched data: reshape slack_info if it contains multiple graphs
-    if hasattr(data, 'batch') and data.batch is not None:
-        # Batched data: slack_info contains info for each graph in the batch
-        batch_size = data.batch.max().item() + 1
-        slack_info_per_graph = data.slack_info.view(batch_size, 4)
-        # Get slack info for each node based on which graph it belongs to
-        node_slack_info = slack_info_per_graph[data.batch]  # [num_nodes, 4]
-        slack_vm_pu = node_slack_info[:, 0]  # Per-node slack voltage magnitude
-        slack_va_rad = node_slack_info[:, 1] * torch.pi / 180.0  # Per-node slack angle
-        slack_r_pu = node_slack_info[:, 2]  # Per-node slack resistance
-        slack_x_pu = node_slack_info[:, 3]  # Per-node slack reactance
-    else:
-        # Single graph: broadcast slack_info to all nodes
-        slack_vm_pu = data.slack_info[0].expand(num_pq_buses)
-        slack_va_rad = (data.slack_info[1] * torch.pi / 180.0).expand(num_pq_buses)
-        slack_r_pu = data.slack_info[2].expand(num_pq_buses)
-        slack_x_pu = data.slack_info[3].expand(num_pq_buses)
-    
-    # Extract edge data (contains only PQ-PQ connections after transformation)
-    edge_index = data.edge_index
-    r_pu = data.edge_attr[:, 0]  # Resistance per unit
-    x_pu = data.edge_attr[:, 1]  # Reactance per unit
-    
-    # Compute edge admittances for PQ-PQ connections: Y = 1/Z = 1/(R + jX)
-    impedance_sq = r_pu**2 + x_pu**2
-    G_edges = r_pu / impedance_sq  # Conductance G = R/(R² + X²)
-    B_edges = -x_pu / impedance_sq  # Susceptance B = -X/(R² + X²)
-    
-    # Build nodal admittance matrix diagonal elements using vectorized scatter operations
-    # Sum admittances from PQ-PQ connections only from from_bus to match original implementation
-    G_diag_pq = scatter_add(G_edges, edge_index[0], dim=0, dim_size=num_pq_buses)
-    
-    B_diag_pq = scatter_add(B_edges, edge_index[0], dim=0, dim_size=num_pq_buses)
-    
-    # Add admittances from missing PQ-slack connections using global slack info
-    # Compute slack connection admittances
-    slack_impedance_sq = slack_r_pu**2 + slack_x_pu**2
-    G_slack = slack_r_pu / slack_impedance_sq
-    B_slack = -slack_x_pu / slack_impedance_sq
-    
-    # Identify which PQ buses were originally connected to slack bus
-    # These buses have hops_to_slack == 1 in the node features
-    hops_to_slack = data.x[:, 2]  # 3rd feature contains hops to slack
-    directly_connected_to_slack = (hops_to_slack == 1).float()  # Binary mask
-    
-    # Add slack connection admittances only to directly connected PQ buses
-    G_diag_pq += directly_connected_to_slack * G_slack
-    B_diag_pq += directly_connected_to_slack * B_slack
-    
-    # Calculate self-admittance terms (π-model diagonal contribution)
-    # Use correct sign convention for nodal power injection
-    P_self_pq = -V_pred**2 * G_diag_pq  # Negative for injection convention
-    Q_self_pq = -V_pred**2 * B_diag_pq  # Self-reactive power contribution
-    
-    # Calculate PQ-PQ interaction terms (off-diagonal contributions)
-    i_nodes = edge_index[0]  # From bus indices
-    j_nodes = edge_index[1]  # To bus indices
-    
-    # Compute angle differences and voltage products for all PQ-PQ connections
-    theta_diff_pq = theta_pred_rad[i_nodes] - theta_pred_rad[j_nodes]
-    V_products_pq = V_pred[i_nodes] * V_pred[j_nodes]
-    
-    # AC power flow interaction equations
-    P_interactions_pq = V_products_pq * (G_edges * torch.cos(theta_diff_pq) + B_edges * torch.sin(theta_diff_pq))
-    Q_interactions_pq = V_products_pq * (G_edges * torch.sin(theta_diff_pq) - B_edges * torch.cos(theta_diff_pq))
-    
-    # Sum all PQ-PQ interactions at each bus using vectorized scatter operations
-    # Apply negative sign for injection convention during aggregation
-    # Only sum from from_bus (edge_index[0]) to match original implementation
-    P_interaction_sum_pq = -scatter_add(P_interactions_pq, edge_index[0], dim=0, dim_size=num_pq_buses)
-    Q_interaction_sum_pq = scatter_add(Q_interactions_pq, edge_index[0], dim=0, dim_size=num_pq_buses)
-    
-    # Add PQ-slack interactions for directly connected buses
-    # These represent the missing edges that were removed during transformation
-    theta_diff_slack = theta_pred_rad - slack_va_rad  # PQ angles - slack angle
-    V_products_slack = V_pred * slack_vm_pu  # PQ voltages * slack voltage
-    
-    # Compute power flows to slack bus (same equations as PQ-PQ but with slack voltage)
-    P_interactions_slack = V_products_slack * (G_slack * torch.cos(theta_diff_slack) + B_slack * torch.sin(theta_diff_slack))
-    Q_interactions_slack = V_products_slack * (G_slack * torch.sin(theta_diff_slack) - B_slack * torch.cos(theta_diff_slack))
-    
-    # Add slack interactions only for directly connected PQ buses
-    P_interaction_sum_pq += -directly_connected_to_slack * P_interactions_slack
-    Q_interaction_sum_pq += directly_connected_to_slack * Q_interactions_slack
-    
-    # Total nodal power injections using AC power flow equations
-    # P_i = -V_i² * G_ii + Σ_j interactions_ij (with correct signs)
-    P_calculated = P_self_pq - P_interaction_sum_pq
-    Q_calculated = Q_self_pq - Q_interaction_sum_pq
-    
-    # Extract true power injections from node features
-    # Transformed dataset stores actual injections (generation - load) in first two features
-    P_true = data.x[:, 0]  # Active power injection (MW) 
-    Q_true = data.x[:, 1]  # Reactive power injection (Mvar)
-    
-    # Physics loss: calculated power injections should match true values
-    # This enforces Kirchhoff's laws at each bus
-    P_error = P_true - P_calculated
-    Q_error = Q_true - Q_calculated
-
-    epsilon = 1e-8  # Small value to prevent division by zero
-    normalized_p_imbalance = P_error / (torch.abs(P_true) + epsilon)
-    normalized_q_imbalance = Q_error / (torch.abs(Q_true) + epsilon)
-    loss = torch.mean(normalized_p_imbalance**2) + torch.mean(normalized_q_imbalance**2)
-
-    return loss
-    
-    # Return sum of squared errors across all buses
-    physics_loss = torch.sum(P_error**2 + Q_error**2)
-    
-    return physics_loss
-
 
 def complex_mse_loss(y_pred, y_true):
     """
@@ -632,3 +471,103 @@ def test(model,
     mape_va /= len(loader_test.dataset)
 
     return rmse_vm, rmse_va, mape_vm, mape_va
+
+def get_paths_from_loader(loader):
+    target_series_all = []
+    covariate_series_all = []
+
+    for sample in loader:
+        for path_data in sample['paths']:
+            target_series_all.append(path_data['target_series'])
+            covariate_series_all.append(path_data['covariate_series'])
+    return target_series_all, covariate_series_all
+
+def train_sequential(model,
+                     loader_train,
+                     loader_val,
+                     epochs=100,
+                     save_model_to=''):
+    """
+    Train a sequential model with early stopping and optional best weights saving.
+    Args:
+        model (darts Model): The PyTorch model to be trained.
+        loader_train (list[Object]): DataLoader for the training dataset.
+        loader_val (list[Object]): DataLoader for the validation dataset.
+        epochs (int, optional): Maximum number of training epochs. Defaults to 100.
+        save_model_to (str, optional): Path to save the final model weights. If empty, model is not saved. Defaults to ''.
+    Returns:
+        tuple: (train_loss_vec, val_loss_vec, best_val_loss, corresponding_train_loss, total_epochs, train_time)
+            - train_loss_vec (np.array): Training loss values over epochs.
+            - val_loss_vec (np.array): Validation loss values over epochs.
+            - best_val_loss (float): Best validation loss achieved.
+            - corresponding_train_loss (float): Training loss corresponding to the best validation loss.
+            - total_epochs (int): Total number of epochs run (may be less than max epochs due to early stopping).
+            - train_time (float): Total training time in seconds.
+    """
+    # Collect all training paths
+    target_series_train, covariate_series_train = get_paths_from_loader(loader_train)
+    target_series_val, covariate_series_val = get_paths_from_loader(loader_val)
+
+    print(f"Collected {len(target_series_train)} training paths", flush=True)
+
+    # Train the model
+    start_time = time.time()
+    model.fit(target_series_train,
+              covariate_series_train,
+              target_series_val,
+              covariate_series_val)
+    train_time = time.time() - start_time
+    print(f"Training completed in {train_time:.2f} seconds", flush=True)
+    validation_error = model.get_validation_error()
+
+    return train_time, validation_error
+
+def rmse_sequential_wrapped_va(y_pred, y_true, period=360.0):
+    """
+    Compute the root mean squared error (RMSE) between true and predicted values.
+    Args:
+        y_pred (np.array): Predicted values of shape (N, D), where second column is va_degree.
+        y_true (np.array): True values of shape (N, D), where second column is va_degree.
+    Returns:
+        np.array: RMSE for each dimension (D,).
+    """
+    # Calculate simple difference
+    diff = y_true - y_pred
+
+    # Wrap the difference to the interval [-period/2, period/2]
+    # This solves an issue where 359 is seen as far from 0.1 degree
+    diff[:, 1] = np.remainder(diff[:, 1] + (period / 2), period) - (period / 2)
+
+    return np.sqrt(np.mean(diff ** 2, axis=0))
+
+def test_sequential(model,
+                    loader_test):
+    """
+    Evaluate a sequential model on a test dataset and compute RMSE and MAPE for voltage magnitude and angle.
+    Args:
+        model (darts Model): The PyTorch model to be evaluated.
+        loader_test (list[Object]): DataLoader for the test dataset.
+    Returns:
+        tuple: (rmse_vm, rmse_va)
+            - rmse_vm (float): RMSE for voltage magnitude (vm_pu).
+            - rmse_va (float): RMSE for voltage angle (va_degree).
+    """
+    # Test the model
+    rmse_vm = 0
+    rmse_va = 0
+    inference_time = 0
+    for sample in loader_test:
+        start = time.time()
+        predictions = model.predict(sample)
+        inference_time += (time.time() - start)
+        loss_rmse = rmse_sequential_wrapped_va(predictions[1:],
+                                               sample['true_voltages'][1:]) # Skip slack
+        rmse_vm += loss_rmse[0]
+        rmse_va += loss_rmse[1]
+
+    rmse_vm /= len(loader_test)
+    rmse_va /= len(loader_test)
+    avg_inference_time_ms = inference_time * 1000 / len(loader_test)
+    # print(f"Average inference time per sample: {avg_inference_time_ms:.4f} milliseconds", flush=True)
+
+    return rmse_vm, rmse_va, avg_inference_time_ms
