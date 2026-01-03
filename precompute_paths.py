@@ -16,7 +16,7 @@ from tqdm import tqdm
 import numpy as np
 
 from utils.training_utils import get_dist_grid_codes
-from utils.data_utils import _extract_paths_from_sample
+from utils.data_utils import _extract_paths_from_sample, get_grid_paths
 import torch
 
 
@@ -28,10 +28,9 @@ def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_d
     
     The saved format stores raw numpy arrays which are fast to load.
     TimeSeries objects are created on-demand when loading.
-    """
-    # Load raw dataset
-    dataset_path = os.path.join(data_dir, grid_type, 'train', 'dataset_with_ppci.pt')
-    raw_dataset = torch.load(dataset_path, weights_only=False)
+    """ 
+    # Load and prepare all samples
+    all_samples = get_grid_paths(data_dir, grid_type, slack_vm_pu, slack_va_degree)
     
     # Feature and target column names (for reference when loading)
     feature_names = [
@@ -40,37 +39,7 @@ def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_d
         'V_LDF_j', 'theta_LDF_j'
     ]
     target_names = ['V_j', 'theta_j']
-    
-    # Process each sample in the dataset
-    all_samples = []
-    
-    for sample_idx, data in enumerate(tqdm(raw_dataset, desc=f"Processing {grid_type}", leave=False)):
-        # Extract paths from this sample (the expensive computation)
-        path_data_list = _extract_paths_from_sample(
-            data, 
-            slack_index=0,
-            slack_vm_pu=slack_vm_pu,
-            slack_va_degree=slack_va_degree
-        )
-        
-        # Store as numpy arrays (NOT TimeSeries)
-        sample_paths = []
-        for path_data in path_data_list:
-            sample_paths.append({
-                'features': path_data['features'],  # numpy array
-                'targets': path_data['targets'],    # numpy array
-                'path': path_data['path'],          # list of ints
-                'target_node': path_data['target_node'],  # int
-            })
-        
-        all_samples.append({
-            'grid_type': grid_type,
-            'sample_idx': sample_idx,
-            'num_nodes': len(data.x),
-            'paths': sample_paths,
-            'true_voltages': data.y[:, 2:4].numpy(),  # Ground truth for all nodes
-        })
-    
+
     # Save to pickle file
     output_path = os.path.join(data_dir, grid_type, 'train', 'dataset_sequential.pkl')
     

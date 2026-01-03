@@ -382,8 +382,8 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
             - 'grid_type': str, the grid type identifier
             - 'sample_idx': int, index of this sample in the original dataset
             - 'paths': list of dict, each containing:
-                - 'target_series': darts.TimeSeries with targets [V_j, theta_j]
-                - 'covariate_series': darts.TimeSeries with features (past_covariates)
+                - 'target_series': numpy array with targets [V_j, theta_j]
+                - 'covariate_series': numpy array with features (past_covariates)
                 - 'path': list of node indices
                 - 'target_node': int, the final node in the path
     
@@ -410,8 +410,8 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
     
     # Process each sample in the dataset
     all_samples = []
-    
-    for sample_idx, data in enumerate(raw_dataset):
+
+    for sample_idx, data in enumerate(tqdm(raw_dataset, desc=f"Processing {grid_type}", leave=False)):
         # Extract paths from this sample
         path_data_list = _extract_paths_from_sample(
             data, 
@@ -419,39 +419,26 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
             slack_vm_pu=slack_vm_pu,
             slack_va_degree=slack_va_degree
         )
-        
-        # Convert to darts TimeSeries format
+
+        # Store as numpy arrays
         sample_paths = []
-        
+
         for path_data in path_data_list:
-            features = path_data['features']
-            targets = path_data['targets']
-            
-            # Create DataFrames for darts
-            # Using integer index as "time" (step along path)
-            df_features = pd.DataFrame(features, columns=feature_names)
-            df_targets = pd.DataFrame(targets, columns=target_names)
-            
-            # Create TimeSeries objects
-            # For sequence prediction, we treat path position as the time dimension
-            covariate_series = TimeSeries.from_dataframe(df_features)
-            target_series = TimeSeries.from_dataframe(df_targets)
-            
             sample_paths.append({
-                'target_series': target_series,
-                'covariate_series': covariate_series,
-                'path': path_data['path'],
-                'target_node': path_data['target_node'],
-                'true_voltages': data.y[:, 2:4].numpy()
+                'target_series': path_data['targets'],  # numpy array
+                'covariate_series': path_data['features'],    # numpy array
+                'path': path_data['path'],          # list of ints
+                'target_node': path_data['target_node'],  # int
             })
-        
+
         all_samples.append({
             'grid_type': grid_type,
             'sample_idx': sample_idx,
             'num_nodes': len(data.x),
-            'paths': sample_paths
+            'paths': sample_paths,
+            'true_voltages': data.y[:, 2:4].numpy(),  # Ground truth for all nodes
         })
-    
+
     return all_samples
 
 
@@ -495,17 +482,8 @@ def load_precomputed_paths(data_dir, grid_type):
         sample_paths = []
 
         for path_data in sample['paths']:
-            # # Create DataFrames for darts
-            # df_features = pd.DataFrame(path_data['features'], columns=feature_names)
-            # df_targets = pd.DataFrame(path_data['targets'], columns=target_names)
-
-            # # Create TimeSeries objects
-            # covariate_series = TimeSeries.from_dataframe(df_features)
-            # target_series = TimeSeries.from_dataframe(df_targets)
-
-            # Create TimesSeries objects from numpy arrays
-            covariate_series = TimeSeries.from_values(path_data['features'])
-            target_series = TimeSeries.from_values(path_data['targets'])
+            target_series = path_data['targets']
+            covariate_series = path_data['features']
 
             sample_paths.append({
                 'target_series': target_series,
