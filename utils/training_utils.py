@@ -541,29 +541,90 @@ def rmse_sequential_wrapped_va(y_pred, y_true, period=360.0):
     return np.sqrt(np.mean(diff ** 2, axis=0))
 
 def test_sequential(model,
-                    loader_test):
+                    loader_test,
+                    plot=False):
     """
     Evaluate a sequential model on a test dataset and compute RMSE and MAPE for voltage magnitude and angle.
     Args:
         model (darts Model): The PyTorch model to be evaluated.
         loader_test (list[Object]): DataLoader for the test dataset.
     Returns:
-        tuple: (rmse_vm, rmse_va)
+        tuple: (rmse_vm, rmse_va, avg_inference_time_ms)
             - rmse_vm (float): RMSE for voltage magnitude (vm_pu).
             - rmse_va (float): RMSE for voltage angle (va_degree).
+            - avg_inference_time_ms (float): Average inference time per sample in milliseconds.
     """
+    # For plotting
+    largest_error = 0
+    largest_error_pred = None
+    largest_error_true = None
+    smallest_error = np.Inf
+    smallest_error_pred = None
+    smallest_error_true = None
+
     # Test the model
     rmse_vm = 0
     rmse_va = 0
     inference_time = 0
-    for sample in loader_test:
+
+    for sample in tqdm(loader_test):
         start = time.time()
         predictions = model.predict(sample)
         inference_time += (time.time() - start)
         loss_rmse = rmse_sequential_wrapped_va(predictions[1:],
                                                sample['true_voltages'][1:]) # Skip slack
+        if loss_rmse[0] > largest_error:
+            largest_error = loss_rmse[0]
+            largest_error_pred = predictions
+            largest_error_true = sample['true_voltages']
+
+        if loss_rmse[0] < smallest_error:
+            smallest_error = loss_rmse[0]
+            smallest_error_pred = predictions
+            smallest_error_true = sample['true_voltages']
+
         rmse_vm += loss_rmse[0]
         rmse_va += loss_rmse[1]
+
+    def plot_predictions(pred_smallest, true_smallest, pred_largest, true_largest):
+        plt.figure(figsize=(10,5))
+        plt.subplot(2,2,1)
+        plt.plot(true_smallest[:,0], label='True vm_pu')
+        plt.plot(pred_smallest[:,0], label='Predicted vm_pu')
+        plt.title('Voltage Magnitude Prediction with Smallest Error')
+        plt.xlabel('Time Step')
+        plt.ylabel('vm_pu')
+        plt.legend()
+
+        plt.subplot(2,2,2)
+        plt.plot(true_largest[:,0], label='True vm_pu')
+        plt.plot(pred_largest[:,0], label='Predicted vm_pu')
+        plt.title('Voltage Magnitude Prediction with Largest Error')
+        plt.xlabel('Time Step')
+        plt.ylabel('vm_pu')
+        plt.legend()
+
+        plt.subplot(2,2,3)
+        plt.plot(true_smallest[:,1], label='True va_degree')
+        plt.plot(pred_smallest[:,1], label='Predicted va_degree')
+        plt.title('Voltage Angle Prediction with Smallest Error')
+        plt.xlabel('Time Step')
+        plt.ylabel('va_degree')
+        plt.legend()
+
+        plt.subplot(2,2,4)
+        plt.plot(true_largest[:,1], label='True va_degree')
+        plt.plot(pred_largest[:,1], label='Predicted va_degree')
+        plt.title('Voltage Angle Prediction with Largest Error')
+        plt.xlabel('Time Step')
+        plt.ylabel('va_degree')
+        plt.legend()
+
+        plt.tight_layout()
+        plt.show()
+
+    if plot:
+        plot_predictions(smallest_error_pred[1:], smallest_error_true[1:], largest_error_pred[1:], largest_error_true[1:]) # Skip slack
 
     rmse_vm /= len(loader_test)
     rmse_va /= len(loader_test)

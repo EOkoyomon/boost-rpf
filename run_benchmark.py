@@ -15,6 +15,13 @@ from models.models import (
     NormedGNN_Residuals,
     XGBModel_Basic,
     XGBModel_Linear,
+    XGBModel_Normalized,
+    XGB_Absolute,
+    XGB_Parent,
+    XGB_LDF,
+    XGB_Absolute_Normalized,
+    XGB_Parent_Normalized,
+    XGB_LDF_Normalized
 )
 from utils.data_utils import get_dataloaders
 from utils.training_utils import (
@@ -39,11 +46,7 @@ def parse_args():
     parser.add_argument(
         "--model",
         default="xgb-basic",
-        choices=[
-            "ALL",
-            "xgb-basic",
-            "xgb-linear",
-        ],
+        choices=["ALL"] + list(MODEL_CLASSES.keys()),
     )
     parser.add_argument(
         "--batch_size",
@@ -160,6 +163,7 @@ def evaluate_performance_sequential(model_class,
                                     loader_val,
                                     loader_test,
                                     epochs=100,
+                                    plot=False,
                                     save_model=False,
                                     eval_only=False,
                                     experiment_id='0'):
@@ -193,7 +197,8 @@ def evaluate_performance_sequential(model_class,
 
     # Test the model
     rmse_vm, rmse_va, inference_time_ms = test_sequential(model=model,
-                                                          loader_test=loader_test)
+                                                          loader_test=loader_test,
+                                                          plot=plot)
 
     corresponding_train_loss = total_epochs = -1
 
@@ -201,20 +206,35 @@ def evaluate_performance_sequential(model_class,
 
 # Get models to evaluate
 MODEL_CLASSES = {
-    "dist-flow": DistFlow,
-    "lin-dist-flow": LinDistFlow,
-    "n-gnn": NormedGNN,
-    "n-gnn-residuals": NormedGNN_Residuals,
-    "n-gnn-loss-supervised": NormedGNN_PhysicsLoss_Supervised,
-    "n-gnn-complex": NormedGNN_Complex,
-    "dc-pf": DC_PF,
-    "dc-pf-slack": DC_PF_Slack,
-    "xgb-basic": XGBModel_Basic,
-    "xgb-linear": XGBModel_Linear,
+    # "dist-flow": DistFlow,
+    # "lin-dist-flow": LinDistFlow,
+    # "n-gnn": NormedGNN,
+    # "n-gnn-residuals": NormedGNN_Residuals,
+    # "n-gnn-loss-supervised": NormedGNN_PhysicsLoss_Supervised,
+    # "n-gnn-complex": NormedGNN_Complex,
+    # "dc-pf": DC_PF,
+    # "dc-pf-slack": DC_PF_Slack,
+    # "xgb-basic": XGBModel_Basic,
+    # "xgb-linear": XGBModel_Linear,
+    # "xgb-normalized": XGBModel_Normalized,
+    "xgb-absolute": XGB_Absolute,
+    "xgb-parent": XGB_Parent,
+    "xgb-ldf": XGB_LDF,
+    "xgb-absolute-n": XGB_Absolute_Normalized,
+    "xgb-parent-n": XGB_Parent_Normalized,
+    "xgb-ldf-n": XGB_LDF_Normalized,
 }
 COMPLEX_MODELS = [NormedGNN_Complex]
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
-SEQUENTIAL_MODELS = [XGBModel_Basic, XGBModel_Linear]
+SEQUENTIAL_MODELS = [XGBModel_Basic,
+                     XGBModel_Linear,
+                     XGBModel_Normalized,
+                     XGB_Absolute,
+                     XGB_Parent,
+                     XGB_LDF,
+                     XGB_Absolute_Normalized,
+                     XGB_Parent_Normalized,
+                     XGB_LDF_Normalized]
 REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(COMPLEX_MODELS) - set(SEQUENTIAL_MODELS)
 
 def run_benchmark(args):
@@ -263,8 +283,7 @@ def run_benchmark(args):
         pd.DataFrame(columns=column_names).to_csv(results_file)
         print(f'\nResults will be saved to: {results_file}', flush=True)
 
-    # models_to_evaluate = [MODEL_CLASSES[args.model]] if args.model.upper() != 'ALL' else list(MODEL_CLASSES.values())
-    models_to_evaluate = [MODEL_CLASSES[args.model]] if args.model.upper() != 'ALL' else SEQUENTIAL_MODELS
+    models_to_evaluate = [MODEL_CLASSES[args.model]] if args.model.upper() != 'ALL' else list(MODEL_CLASSES.values())
 
     # Run evaluations
     for training_grids, testing_grid in test_cases:
@@ -318,6 +337,7 @@ def run_benchmark(args):
                                         loader_val=loader_val,
                                         loader_test=loader_test,
                                         epochs=epochs,
+                                        plot=plot,
                                         save_model=save_model,
                                         eval_only=eval_only,
                                         experiment_id=f"{model.__name__}_{testing_grid if testing_grid else 'all'}")
