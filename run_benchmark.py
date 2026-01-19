@@ -21,7 +21,8 @@ from models.models import (
     XGB_LDF,
     XGB_Absolute_Normalized,
     XGB_Parent_Normalized,
-    XGB_LDF_Normalized
+    XGB_LDF_Normalized,
+    XGB_Parent_Corrected,
 )
 from utils.data_utils import get_dataloaders
 from utils.training_utils import (
@@ -223,6 +224,7 @@ MODEL_CLASSES = {
     "xgb-absolute-n": XGB_Absolute_Normalized,
     "xgb-parent-n": XGB_Parent_Normalized,
     "xgb-ldf-n": XGB_LDF_Normalized,
+    "xgb-parent-corrected": XGB_Parent_Corrected,
 }
 COMPLEX_MODELS = [NormedGNN_Complex]
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
@@ -234,7 +236,8 @@ SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGB_LDF,
                      XGB_Absolute_Normalized,
                      XGB_Parent_Normalized,
-                     XGB_LDF_Normalized]
+                     XGB_LDF_Normalized,
+                     XGB_Parent_Corrected]
 REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(COMPLEX_MODELS) - set(SEQUENTIAL_MODELS)
 
 def run_benchmark(args):
@@ -264,6 +267,7 @@ def run_benchmark(args):
     test_cases = [(grids_to_compare, None)]  # All grids scenario
     for grid in grids_to_compare:
         test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
+    test_cases = test_cases[:1] + test_cases[-1:]
 
     # Set up results tracking
     if save_results and log_dir:
@@ -281,7 +285,7 @@ def run_benchmark(args):
         ]
         # Create a DataFrame for the results
         pd.DataFrame(columns=column_names).to_csv(results_file)
-        print(f'\nResults will be saved to: {results_file}', flush=True)
+        print(f'\nResults will be saved to: {results_file}\n', flush=True)
 
     models_to_evaluate = [MODEL_CLASSES[args.model]] if args.model.upper() != 'ALL' else list(MODEL_CLASSES.values())
 

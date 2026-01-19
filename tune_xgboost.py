@@ -12,22 +12,24 @@ from datetime import datetime
 import pandas as pd
 from darts.models import XGBModel
 
-from models.models import XGBModel_Linear
+from models.models import NativeXGBModelWrapper, XGB_Absolute, XGB_LDF, XGB_Parent, XGBModel_Linear
 from utils.data_utils import get_dataloaders
 from utils.training_utils import get_dist_grid_codes, setup_seeds, test_sequential, train_sequential
+import xgboost as xgb
 
 
 def get_param_grid():
     """Define the hyperparameter search space."""
     return {
         # High priority
-        'n_estimators': [100],#[50, 100, 200, 500],
-        'max_depth': [7], #[5, 7, 9, 12],
-        'learning_rate': [0.02], #[0.05, 0.1, 0.2, 0.3],
+        'n_estimators': [50, 100, 200, 300, 400],
+        'max_depth': [7, 9, 12], #[5, 7, 9, 12],
+        'learning_rate': [0.1, 0.2, 0.5, 1.0],
         # Medium priority
-        'min_child_weight': [20], #[1, 5],
-        'subsample': [0.9, 1.0], # [0.8, 1.0],
-        'colsample_bytree': [0.8], #[0.8, 1.0],
+        'min_child_weight': [1, 5, 10, 20], #[1, 5],
+        'subsample': [0.9], # [0.8, 0.9, 1.0]
+        'colsample_bytree': [1.0], #[0.8, 1.0],
+        'multi_strategy': ["multi_output_tree"],
         # Lower priority (optional - uncomment to include)
         # 'reg_alpha': [0, 0.1],
         # 'reg_lambda': [1.0, 10.0],
@@ -55,19 +57,15 @@ def create_tuned_model_class(params):
     Create a TunedXGBModel class that inherits from XGBModel_Linear
     but uses custom hyperparameters.
     """
-    class TunedXGBModel(XGBModel_Linear):
-        """XGBModel_Linear with custom hyperparameters for tuning."""
-        
+    class TunedXGBModel(XGB_Absolute):
+        """XGBModel with custom hyperparameters for tuning."""
         def __init__(self):
             # Call parent init to set up prediction scheme and other attributes
             super().__init__()
             # Replace the model with one using tuned hyperparameters
-            self.model = XGBModel(
-                lags=self.lags,
-                lags_future_covariates=self.lags_future_covariates,
-                output_chunk_length=1,
-                random_state=42,
-                multi_models=True,
+            self.model = xgb.XGBRegressor(
+                random_state=self.random_state,
+                objective="reg:squarederror",
                 **params  # Inject hyperparameters
             )
         
@@ -94,7 +92,7 @@ def evaluate_params(params, loader_train, loader_val, loader_test):
         'rmse_vm': rmse_vm,
         'rmse_va': rmse_va,
         'train_time': train_time,
-        'combined_score': rmse_vm + 0.1 * rmse_va,  # Weighted combination
+        'combined_score': rmse_vm + 0.01 * rmse_va,  # Weighted combination
     }
 
 
@@ -164,14 +162,15 @@ def run_tuning(args):
         json.dump({'params': best_params, 'score': best_score}, f, indent=2)
     print(f"Best params saved to: {best_params_file}")
     
+    TOP_N = 10
     # Print summary
     print("\n" + "="*60)
     print("TUNING COMPLETE")
     print("="*60)
     print(f"Best parameters: {best_params}")
     print(f"Best combined score: {best_score:.6f}")
-    print("\nTop 5 configurations:")
-    print(results_df.head().to_string())
+    print(f"\nTop {TOP_N} configurations:")
+    print(results_df.head(TOP_N).to_string())
     
     return best_params
 

@@ -472,16 +472,6 @@ def test(model,
 
     return rmse_vm, rmse_va, mape_vm, mape_va
 
-def get_paths_from_loader(loader):
-    target_series_all = []
-    covariate_series_all = []
-
-    for sample in loader:
-        for path_data in sample['paths']:
-            target_series_all.append(path_data['target_series'])
-            covariate_series_all.append(path_data['covariate_series'])
-    return target_series_all, covariate_series_all
-
 def train_sequential(model,
                      loader_train,
                      loader_val,
@@ -504,18 +494,9 @@ def train_sequential(model,
             - total_epochs (int): Total number of epochs run (may be less than max epochs due to early stopping).
             - train_time (float): Total training time in seconds.
     """
-    # Collect all training paths
-    target_series_train, covariate_series_train = get_paths_from_loader(loader_train)
-    target_series_val, covariate_series_val = get_paths_from_loader(loader_val)
-
-    print(f"Collected {len(target_series_train)} training paths", flush=True)
-
     # Train the model
     start_time = time.time()
-    model.fit(target_series_train,
-              covariate_series_train,
-              target_series_val,
-              covariate_series_val)
+    model.fit(loader_train, loader_val)
     train_time = time.time() - start_time
     print(f"Training completed in {train_time:.2f} seconds", flush=True)
     validation_error = model.get_validation_error()
