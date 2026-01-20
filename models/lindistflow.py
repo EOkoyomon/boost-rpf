@@ -2,8 +2,52 @@ import time
 
 import networkx as nx
 import numpy as np
+import torch
+import torch.nn as nn
 from scipy.sparse import find
 
+
+class LinDistFlow(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def use_physics_loss(self):
+        return False
+
+    def is_supervised(self):
+        return False
+
+    def is_complex(self):
+        return False
+
+    def is_analytical(self):
+        return True
+
+    def forward(self, data):
+        vm_predictions, va_predictions = calculate_lindistflow_iterative(data, slack_index=0, slack_vm_pu=data.slack_info[0])
+        out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
+        return out
+
+class DistFlow(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def use_physics_loss(self):
+        return False
+
+    def is_supervised(self):
+        return False
+
+    def is_complex(self):
+        return False
+
+    def is_analytical(self):
+        return True
+
+    def forward(self, data):
+        vm_predictions, va_predictions = calculate_distflow_iterative(data, slack_index=0, slack_vm_pu=data.slack_info[0])
+        out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
+        return out
 
 def calculate_lindistflow(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=-150.0):
     """

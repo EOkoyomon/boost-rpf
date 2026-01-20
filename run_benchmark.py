@@ -4,15 +4,17 @@ import os
 import pandas as pd
 import torch
 
-from models.models import (
+from models.dcpf_models import (
     DC_PF,
     DC_PF_Slack,
+)
+from models.lindistflow import (
     DistFlow,
     LinDistFlow,
+)
+from models.models import (
     NormedGNN,
     NormedGNN_Complex,
-    NormedGNN_PhysicsLoss_Supervised,
-    NormedGNN_Residuals,
 )
 from models.xgb_darts_models import (
     XGBModel_Basic,

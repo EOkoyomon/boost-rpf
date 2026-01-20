@@ -1,25 +1,9 @@
-import numpy as np
-import pandas as pd
 import torch
 import torch.nn as nn
-from darts import TimeSeries
 
 # from complexPyTorch.complexFunctions import complex_relu
 # from complexPyTorch.complexLayers import ComplexLinear
-from darts.models import XGBModel
-from darts.dataprocessing.transformers import Diff
-from torch_geometric.nn import GATv2Conv, GCNConv, GraphConv, MessagePassing
-from torch_geometric.nn.inits import glorot, zeros
-from torch_geometric.typing import OptTensor
-from torch_geometric.utils import add_self_loops, remove_self_loops, softmax
-from tqdm import tqdm
-from sklearn.preprocessing import StandardScaler
-import xgboost as xgb
-
-from models.lindistflow import (
-    calculate_distflow_iterative,
-    calculate_lindistflow_iterative,
-)
+from torch_geometric.nn import MessagePassing
 
 
 class GNNLayer(MessagePassing):
@@ -349,74 +333,3 @@ class NormedGNN_Complex(nn.Module):
             x = x + orig_x[:, 2:3]  # Add slack_vm_pu and slack_va_degree (as one complex voltage)
         return x
 
-class DC_PF(nn.Module):
-    """ Implements the DC Power Flow as a neural network module."""
-    def __init__(self):
-        super().__init__()
-
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return False
-
-    def is_complex(self):
-        return False
-
-    def is_analytical(self):
-        return True
-
-    def forward(self, data):
-        return data.dc_pf
-
-class DC_PF_Slack(DC_PF):
-    """ Sets all voltage magnitudes to slack bus voltage magnitude."""
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, data):
-        out = data.dc_pf
-        out[:, 0] = torch.ones(len(out))*data.slack_info[0]
-        return out
-
-class LinDistFlow(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return False
-
-    def is_complex(self):
-        return False
-
-    def is_analytical(self):
-        return True
-
-    def forward(self, data):
-        vm_predictions, va_predictions = calculate_lindistflow_iterative(data, slack_index=0, slack_vm_pu=data.slack_info[0])
-        out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
-        return out
-
-class DistFlow(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return False
-
-    def is_complex(self):
-        return False
-
-    def is_analytical(self):
-        return True
-
-    def forward(self, data):
-        vm_predictions, va_predictions = calculate_distflow_iterative(data, slack_index=0, slack_vm_pu=data.slack_info[0])
-        out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
-        return out
