@@ -8,13 +8,12 @@ from models.dcpf_models import (
     DC_PF,
     DC_PF_Slack,
 )
+from models.gnn_models import (
+    NormedGNN,
+)
 from models.lindistflow import (
     DistFlow,
     LinDistFlow,
-)
-from models.models import (
-    NormedGNN,
-    NormedGNN_Complex,
 )
 from models.xgb_darts_models import (
     XGBModel_Basic,
@@ -22,13 +21,13 @@ from models.xgb_darts_models import (
     XGBModel_Normalized,
 )
 from models.xgb_models import (
-    XGB_Absolute,
-    XGB_Parent,
     XGB_LDF,
+    XGB_Absolute,
     XGB_Absolute_Normalized,
-    XGB_Parent_Normalized,
     XGB_LDF_Normalized,
+    XGB_Parent,
     XGB_Parent_Corrected,
+    XGB_Parent_Normalized,
 )
 from utils.data_utils import get_dataloaders
 from utils.training_utils import (
@@ -38,11 +37,12 @@ from utils.training_utils import (
     get_model_save_path,
     plot_loss,
     setup_seeds,
-    train,
     test,
     test_sequential,
+    train,
     train_sequential,
 )
+
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -215,9 +215,6 @@ MODEL_CLASSES = {
     # "dist-flow": DistFlow,
     # "lin-dist-flow": LinDistFlow,
     # "n-gnn": NormedGNN,
-    # "n-gnn-residuals": NormedGNN_Residuals,
-    # "n-gnn-loss-supervised": NormedGNN_PhysicsLoss_Supervised,
-    # "n-gnn-complex": NormedGNN_Complex,
     # "dc-pf": DC_PF,
     # "dc-pf-slack": DC_PF_Slack,
     # "xgb-basic": XGBModel_Basic,
@@ -231,7 +228,7 @@ MODEL_CLASSES = {
     "xgb-ldf-n": XGB_LDF_Normalized,
     "xgb-parent-corrected": XGB_Parent_Corrected,
 }
-COMPLEX_MODELS = [NormedGNN_Complex]
+COMPLEX_MODELS = []
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
 SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGBModel_Linear,
