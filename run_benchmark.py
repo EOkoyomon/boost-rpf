@@ -13,9 +13,13 @@ from models.models import (
     NormedGNN_Complex,
     NormedGNN_PhysicsLoss_Supervised,
     NormedGNN_Residuals,
+)
+from models.xgb_darts_models import (
     XGBModel_Basic,
     XGBModel_Linear,
     XGBModel_Normalized,
+)
+from models.xgb_models import (
     XGB_Absolute,
     XGB_Parent,
     XGB_LDF,
@@ -107,9 +111,8 @@ def evaluate_performance(model_class,
     print(f'\n{locals()}', flush=True)
 
     model_weights_path = ''
-    if save_model or plot:
-        assert log_dir, 'Need to pass a log_dir path in order to save model or plot loss'
     if save_model:
+        assert log_dir, 'Need to pass a log_dir path in order to save model or plot loss'
         model_weights_path = get_model_save_path(log_dir, experiment_id)
 
     # PyTorch setup
@@ -259,7 +262,7 @@ def run_benchmark(args):
     setup_seeds()
     
     log_dir = None
-    if save_results or plot or save_model:
+    if save_results or save_model:
         # Create a new log directory for each model
         log_dir = create_log_dir()
     
@@ -267,7 +270,7 @@ def run_benchmark(args):
     test_cases = [(grids_to_compare, None)]  # All grids scenario
     for grid in grids_to_compare:
         test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
-    test_cases = test_cases[:1] + test_cases[-1:]
+    # test_cases = test_cases[:1] + test_cases[-4:-3] + test_cases[-1:]
 
     # Set up results tracking
     if save_results and log_dir:
