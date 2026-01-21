@@ -165,19 +165,21 @@ def transform_dataset(dataset, add_hops=True, grid_name=None):
     
     return transformed_dataset
 
-def get_pyg_graphs(data_dir, grid_type):
+def get_pyg_graphs(data_dir, grid_type, transformed=False):
     """
     Load PyTorch Geometric graphs from the specified directory and grid type.
     Args:
         data_dir (str): Base directory where datasets are stored.
         grid_type (str): The type of sb grid (e.g., '1-LV-rural1--0-no_sw', '1-MV-urban--1-no_sw', etc.)
+        transformed (bool): Whether to apply dataset transformations.
     
     Returns:
         list of torch_geometric.data.Data: List of PyTorch Geometric Data objects.
     """
     dataset_path = os.path.join(data_dir, grid_type, 'train', 'dataset_with_ppci.pt')
     pyg_dataset = torch.load(dataset_path, weights_only=False)
-    pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
+    if transformed:
+        pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
     return pyg_dataset
 
 def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=-150.0):
@@ -222,6 +224,9 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     # y format: [p_mw, q_mvar, vm_pu, va_degree]
     V_true = data.y[:, 2].numpy()  # vm_pu
     theta_true = data.y[:, 3].numpy()  # va_degree
+
+    slack_vm_pu = data.y[slack_index, 2].numpy()
+    slack_va_degree = data.y[slack_index, 3].numpy()
     
     # 2. Build Network Graph from Ybus
     G = nx.DiGraph()
@@ -295,7 +300,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
         theta_LDF[node] = theta_LDF[parent] - (x_ij * P_agg[node] - r_ij * Q_agg[node]) / (slack_vm_pu ** 2)
 
     theta_LDF_deg = np.rad2deg(theta_LDF)
-    
+
     # 6. Extract paths for each non-slack node (up to num_pyg_nodes)
     path_data_list = []
     
@@ -462,7 +467,7 @@ def load_precomputed_paths(data_dir, grid_type):
     # Load pre-computed data
     precomputed_path = os.path.join(data_dir, grid_type, 'train', 'dataset_sequential.pkl')
 
-    if not os.path.exists(precomputed_path):
+    if not os.path.exists(precomputed_path) or True:
         raise FileNotFoundError(
             f"Pre-computed path data not found at {precomputed_path}. "
             f"Run 'python precompute_paths.py --data_dir {data_dir}' first."
@@ -503,15 +508,19 @@ def load_precomputed_paths(data_dir, grid_type):
     return all_samples
 
 
-def create_complex_features(dataset):
+def create_complex_features(dataset, transformed=False):
     """
     Convert real-valued features in the dataset to complex-valued features.
     Args:
         dataset (list of torch_geometric.data.Data): List of PyTorch Geometric Data objects with real-valued features.
+        transformed (bool): Whether the dataset has been transformed (affects feature layout).
 
     Returns:
         list of torch_geometric.data.Data: List of PyTorch Geometric Data objects with complex-valued features.
     """
+    if not transformed:
+        raise NotImplementedError("Complex feature conversion is only implemented for transformed datasets.")
+    
     complex_dataset = []
 
     for data in dataset:
@@ -563,7 +572,7 @@ def create_complex_features(dataset):
 
     return complex_dataset
 
-def get_dataset(data_dir, grid_types, complex=False, paths=False):
+def get_dataset(data_dir, grid_types, complex=False, paths=False, transformed=False):
     """
     Load and cache datasets for the specified grid types.
     Args:
@@ -571,6 +580,7 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False):
         grid_types (list of str): List of grid types to load.
         complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
+        transformed (bool): Whether to load transformed datasets.
 
     Returns:
         list of torch_geometric.data.Data: Combined list of PyTorch Geometric Data objects from all specified grid types.
@@ -594,10 +604,10 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False):
                     pyg_dataset = get_grid_paths(data_dir, grid)
                 DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset
             else:
-                pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
+                pyg_dataset = get_pyg_graphs(data_dir, grid, transformed=transformed) # Fetch real dataset
                 DATASET_CACHE[(grid, "real", "graphs")] = pyg_dataset # Cache real dataset
             if complex:
-                pyg_dataset = create_complex_features(pyg_dataset) # Convert to complex dataset
+                pyg_dataset = create_complex_features(pyg_dataset, transformed=transformed) # Convert to complex dataset
                 DATASET_CACHE[id] = pyg_dataset # Cache complex dataset
         complete_dataset.extend(pyg_dataset)
 
@@ -608,7 +618,8 @@ def get_dataloaders(data_dir,
                     testing_grid=None,
                     batch_size=16,
                     complex=False,
-                    paths=False):
+                    paths=False,
+                    transformed=False):
     """
     Get PyTorch DataLoaders for training, validation, and testing.
     Args:
@@ -618,18 +629,19 @@ def get_dataloaders(data_dir,
         batch_size (int): Batch size for the DataLoaders.
         complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
+        transformed (bool): Whether to load transformed datasets.
 
     Returns:
         tuple: (loader_train, loader_val, loader_test) DataLoaders or dictionaries with darts TimeSeries for training, validation, and testing.
     """
-    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths)
+    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths, transformed=transformed)
 
     if testing_grid:
         # Out of distribution test on left over grid
         train_val_split = [0.75, 0.15]
         train_val_split = [x / sum(train_val_split) for x in train_val_split] # Redistribute to sum to 1
         train_split, val_split = random_split(train_dataset, train_val_split)
-        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths)
+        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths, transformed=transformed)
     else:
         train_val_test_split = [0.75, 0.15, 0.10]
         train_split, val_split, test_split = random_split(train_dataset, train_val_test_split)
