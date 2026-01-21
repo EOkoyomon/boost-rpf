@@ -69,6 +69,16 @@ def parse_args():
         default=100,
     )
     parser.add_argument(
+        "--lr",
+        type=float,
+        default=0.0001,
+    )
+    parser.add_argument(
+        "--patience",
+        type=int,
+        default=50,
+    )
+    parser.add_argument(
         "--save_results",
         action="store_true"
     )
@@ -101,6 +111,8 @@ def evaluate_performance(model_class,
                          loader_val,
                          loader_test,
                          epochs=100,
+                         learning_rate=0.001,
+                         patience=50,
                          log_dir=None,
                          plot=False,
                          save_model=False,
@@ -109,9 +121,7 @@ def evaluate_performance(model_class,
                          model_load_experiment_id='0',
                          experiment_id='0'):
     # Log information about training run
-    learning_rate=1e-3
     early_stopping=True
-    patience=750
     best_val_weights=True
     print(f'\n{locals()}', flush=True)
 
@@ -150,7 +160,7 @@ def evaluate_performance(model_class,
                 patience=patience,
                 best_val_weights=best_val_weights,
                 save_model_to=model_weights_path,
-                log_epochs=(log_dir is not None))
+                log_epochs=True)
 
         # Plot the model
         if plot and log_dir is not None:
@@ -173,6 +183,8 @@ def evaluate_performance_sequential(model_class,
                                     loader_val,
                                     loader_test,
                                     epochs=100,
+                                    learning_rate=0.001,
+                                    patience=50,
                                     plot=False,
                                     save_model=False,
                                     eval_only=False,
@@ -255,6 +267,8 @@ def run_benchmark(args):
     data_dir = args.data_dir
     batch_size = args.batch_size
     epochs = args.epochs
+    learning_rate = args.lr
+    patience = args.patience
     save_results = args.save_results
     plot = args.plot
     save_model = args.save_model
@@ -274,7 +288,7 @@ def run_benchmark(args):
     test_cases = [(grids_to_compare, None)]  # All grids scenario
     for grid in grids_to_compare:
         test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
-    # test_cases = test_cases[:1] + test_cases[-4:-3] + test_cases[-1:]
+    test_cases = test_cases[:1] #+ test_cases[-4:-3] + test_cases[-1:]
 
     # Set up results tracking
     if save_results and log_dir:
@@ -347,6 +361,8 @@ def run_benchmark(args):
                                         loader_val=loader_val,
                                         loader_test=loader_test,
                                         epochs=epochs,
+                                        learning_rate=learning_rate,
+                                        patience=patience,
                                         plot=plot,
                                         save_model=save_model,
                                         eval_only=eval_only,
@@ -358,6 +374,8 @@ def run_benchmark(args):
                                         loader_val=loader_val,
                                         loader_test=loader_test,
                                         epochs=epochs,
+                                        learning_rate=learning_rate,
+                                        patience=patience,
                                         log_dir=log_dir,
                                         plot=plot,
                                         save_model=save_model,

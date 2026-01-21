@@ -52,7 +52,7 @@ def get_device():
         torch.device: The device (CPU or GPU) to be used.
     """
     device = (
-        "cuda:1"
+        "cuda:0"
         if torch.cuda.is_available()
         # else "mps"
         # if torch.backends.mps.is_available()
@@ -143,7 +143,7 @@ def train(model,
           loader_train,
           loader_val,
           epochs=100,
-          learning_rate=1e-3,
+          learning_rate=0.001,
           early_stopping=True,
           patience=100,
           best_val_weights=True,
@@ -177,16 +177,16 @@ def train(model,
     
     # Add learning rate scheduler for physics-informed training
     # Start high to escape poor local minima, then reduce for fine-tuning
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=200, min_lr=0.00001
-    )
+    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    #     optimizer, mode='min', factor=0.5, patience=200, min_lr=0.00001
+    # )
     
-    loss_fn = normalized_mse_loss
+    # loss_fn = normalized_mse_loss
+    # Standard MSE loss (not normalized)
+    loss_fn = nn.MSELoss()
     
     # This helps balance supervised vs physics loss contributions
     lambda_phys = 0.00001  # Weight for physics loss if used
-    # Standard MSE loss (not normalized)
-    # loss_fn = nn.MSELoss(reduction='mean') # Average over all elements
 
     # Variables to track best model
     best_val_loss = np.Inf
@@ -261,7 +261,7 @@ def train(model,
                 wait += 1
 
         # Step learning rate scheduler
-        scheduler.step(loss_val)
+        # scheduler.step(loss_val)
         
         # Track model performance
         train_loss_vec[epoch] = loss_train
@@ -488,6 +488,10 @@ def test(model,
     avg_inference_time_ms = inference_time * 1000 / len(loader_test)
 
     if plot:
+        largest_error_pred = largest_error_pred.cpu().numpy()
+        largest_error_true = largest_error_true.cpu().numpy()
+        smallest_error_pred = smallest_error_pred.cpu().numpy()
+        smallest_error_true = smallest_error_true.cpu().numpy()
         # Saved the predictions without slack bus for plotting
         plot_predictions(smallest_error_pred, smallest_error_true, largest_error_pred, largest_error_true) # Skip slack
 
