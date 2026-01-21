@@ -385,8 +385,8 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
             - 'grid_type': str, the grid type identifier
             - 'sample_idx': int, index of this sample in the original dataset
             - 'paths': list of dict, each containing:
-                - 'target_series': numpy array with targets [V_j, theta_j]
-                - 'covariate_series': numpy array with features (past_covariates)
+                - 'targets': numpy array with targets [V_j, theta_j]
+                - 'features': numpy array with features (past_covariates)
                 - 'path': list of node indices
                 - 'target_node': int, the final node in the path
     
@@ -416,23 +416,12 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
 
     for sample_idx, data in enumerate(tqdm(raw_dataset, desc=f"Processing {grid_type}", leave=False)):
         # Extract paths from this sample
-        path_data_list = _extract_paths_from_sample(
+        sample_paths = _extract_paths_from_sample(
             data, 
             slack_index=0,
             slack_vm_pu=slack_vm_pu,
             slack_va_degree=slack_va_degree
         )
-
-        # Store as numpy arrays
-        sample_paths = []
-
-        for path_data in path_data_list:
-            sample_paths.append({
-                'target_series': path_data['targets'],  # numpy array
-                'covariate_series': path_data['features'],    # numpy array
-                'path': path_data['path'],          # list of ints
-                'target_node': path_data['target_node'],  # int
-            })
 
         all_samples.append({
             'grid_type': grid_type,
@@ -465,7 +454,7 @@ def load_precomputed_paths(data_dir, grid_type):
     # Load pre-computed data
     precomputed_path = os.path.join(data_dir, grid_type, 'train', 'dataset_sequential.pkl')
 
-    if not os.path.exists(precomputed_path) or True:
+    if not os.path.exists(precomputed_path):
         raise FileNotFoundError(
             f"Pre-computed path data not found at {precomputed_path}. "
             f"Run 'python precompute_paths.py --data_dir {data_dir}' first."
