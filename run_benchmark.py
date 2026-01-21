@@ -15,6 +15,9 @@ from models.lindistflow import (
     DistFlow,
     LinDistFlow,
 )
+from models.powerflownet import (
+    PowerFlowNet,
+)
 from models.xgb_darts_models import (
     XGBModel_Basic,
     XGBModel_Linear,
@@ -150,7 +153,7 @@ def evaluate_performance(model_class,
                 log_epochs=(log_dir is not None))
 
         # Plot the model
-        if plot:
+        if plot and log_dir is not None:
             plot_loss(log_dir,
                     model_class.__name__,
                     train_loss_vec,
@@ -158,11 +161,12 @@ def evaluate_performance(model_class,
                     fig_id=experiment_id)
 
     # Test the model
-    rmse_vm, rmse_va, mape_vm, mape_va = test(model=model,
-                                            device=device,
-                                            loader_test=loader_test)
+    rmse_vm, rmse_va, inference_time_ms = test(model=model,
+                                               device=device,
+                                               loader_test=loader_test,
+                                               plot=plot)
 
-    return rmse_vm, rmse_va, mape_vm, mape_va, best_val_loss, corresponding_train_loss, total_epochs, train_time
+    return rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms
 
 def evaluate_performance_sequential(model_class,
                                     loader_train,
@@ -214,7 +218,7 @@ def evaluate_performance_sequential(model_class,
 MODEL_CLASSES = {
     # "dist-flow": DistFlow,
     # "lin-dist-flow": LinDistFlow,
-    # "n-gnn": NormedGNN,
+    "n-gnn": NormedGNN,
     # "dc-pf": DC_PF,
     # "dc-pf-slack": DC_PF_Slack,
     # "xgb-basic": XGBModel_Basic,
@@ -227,6 +231,7 @@ MODEL_CLASSES = {
     "xgb-parent-n": XGB_Parent_Normalized,
     "xgb-ldf-n": XGB_LDF_Normalized,
     "xgb-parent-corrected": XGB_Parent_Corrected,
+    "pfnet": PowerFlowNet,
 }
 COMPLEX_MODELS = []
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
@@ -332,9 +337,8 @@ def run_benchmark(args):
             print(f'\nEvaluating model: {model.__name__} | Testing grid: {testing_grid if testing_grid else "All Grids"}', flush=True)
             # Train and test model
             if model in ANALYTICAL_MODELS:
-                rmse_vm, rmse_va, mape_vm, mape_va = test(model(), get_device(), loader_test)
+                rmse_vm, rmse_va, inference_time_ms = test(model(), get_device(), loader_test)
                 best_val_loss, corresponding_train_loss, total_epochs, train_time = 0, 0, 0, 0
-                inference_time_ms = -1
             elif model in SEQUENTIAL_MODELS:
                 # For sequential models, use path-based evaluation
                 rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms = \
@@ -348,7 +352,7 @@ def run_benchmark(args):
                                         eval_only=eval_only,
                                         experiment_id=f"{model.__name__}_{testing_grid if testing_grid else 'all'}")
             else:
-                rmse_vm, rmse_va, mape_vm, mape_va, best_val_loss, corresponding_train_loss, total_epochs, train_time = \
+                rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms = \
                     evaluate_performance(model_class=model,
                                         loader_train=loader_train,
                                         loader_val=loader_val,
@@ -361,7 +365,6 @@ def run_benchmark(args):
                                         load_model_dir=load_model_dir,
                                         model_load_experiment_id=f"{load_model_name}_{testing_grid if testing_grid else 'all'}",
                                         experiment_id=f"{model.__name__}_{testing_grid if testing_grid else 'all'}")
-                inference_time_ms = -1
             
             results.append(
                 (

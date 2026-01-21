@@ -137,23 +137,23 @@ def transform_dataset(dataset, add_hops=True, grid_name=None):
         
         # Remove bus type encodings. Also remove vm_pu and va_degree from inputs 
         # since they are unknowns for PQ buses.
-        # Original: [Slack?, PV?, PQ?, p_mw, q_mvar, vm_pu, va_degree, hops_to_slack]
-        # New: [p_mw, q_mvar, hops_to_slack]
-        new_x_transformed = torch.cat([new_x[:, 3:5], new_x[:, 7:]], dim=1)  # [p_mw, q_mvar, hops_to_slack]
+        # Original: [Slack?, PV?, PQ?, p_mw, q_mvar, vm_pu, va_degree, hops_to_slack] (where hops_to_slack is added if add_hops=True)
+        # New: [p_mw, q_mvar, vm_pu, va_degree, hops_to_slack]
+        new_x_transformed = torch.cat([new_x[:, 3:7], new_x[:, 7:]], dim=1)  # [p_mw, q_mvar, vm_pu, va_degree, hops_to_slack]
 
         new_edge_index = data.edge_index
         new_edge_attr = data.edge_attr
         
         # Simplify edge attributes to [r_pu, x_pu] (remove trafo? and sc_voltage)
         # Original: [trafo?, r_pu, x_pu, sc_voltage]
-        # New: [r_pu, x_pu]
-        new_edge_attr_simplified = new_edge_attr[:, 1:3]  # Keep only r_pu and x_pu
+        # # New: [r_pu, x_pu]
+        # new_edge_attr_simplified = new_edge_attr[:, 1:3]  # Keep only r_pu and x_pu
         
         # Create new Data object with slack connection info as global attribute
         transformed_data = Data(
-            x=new_x_transformed, # [p_mw, q_mvar, hops_to_slack]
+            x=new_x_transformed, # [p_mw, q_mvar, vm_pu, va_degree, hops_to_slack]
             edge_index=new_edge_index, 
-            edge_attr=new_edge_attr_simplified, # [r_pu, x_pu]
+            edge_attr=new_edge_attr, # [trafo?, r_pu, x_pu, sc_voltage]
             y=new_y, # [vm_pu, va_degree]
             dc_pf=data.dc_pf[:, 2:4], # [vm_pu, va_degree]
             slack_info=torch.tensor([slack_vm_pu, slack_va_degree, slack_r_pu, slack_x_pu]),  # Global slack connection info
@@ -165,21 +165,19 @@ def transform_dataset(dataset, add_hops=True, grid_name=None):
     
     return transformed_dataset
 
-def get_pyg_graphs(data_dir, grid_type, transformed=False):
+def get_pyg_graphs(data_dir, grid_type):
     """
     Load PyTorch Geometric graphs from the specified directory and grid type.
     Args:
         data_dir (str): Base directory where datasets are stored.
         grid_type (str): The type of sb grid (e.g., '1-LV-rural1--0-no_sw', '1-MV-urban--1-no_sw', etc.)
-        transformed (bool): Whether to apply dataset transformations.
     
     Returns:
         list of torch_geometric.data.Data: List of PyTorch Geometric Data objects.
     """
     dataset_path = os.path.join(data_dir, grid_type, 'train', 'dataset_with_ppci.pt')
     pyg_dataset = torch.load(dataset_path, weights_only=False)
-    if transformed:
-        pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
+    pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
     return pyg_dataset
 
 def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=-150.0):
@@ -508,19 +506,15 @@ def load_precomputed_paths(data_dir, grid_type):
     return all_samples
 
 
-def create_complex_features(dataset, transformed=False):
+def create_complex_features(dataset):
     """
     Convert real-valued features in the dataset to complex-valued features.
     Args:
         dataset (list of torch_geometric.data.Data): List of PyTorch Geometric Data objects with real-valued features.
-        transformed (bool): Whether the dataset has been transformed (affects feature layout).
 
     Returns:
         list of torch_geometric.data.Data: List of PyTorch Geometric Data objects with complex-valued features.
     """
-    if not transformed:
-        raise NotImplementedError("Complex feature conversion is only implemented for transformed datasets.")
-    
     complex_dataset = []
 
     for data in dataset:
@@ -572,7 +566,7 @@ def create_complex_features(dataset, transformed=False):
 
     return complex_dataset
 
-def get_dataset(data_dir, grid_types, complex=False, paths=False, transformed=False):
+def get_dataset(data_dir, grid_types, complex=False, paths=False):
     """
     Load and cache datasets for the specified grid types.
     Args:
@@ -580,7 +574,6 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False, transformed=Fa
         grid_types (list of str): List of grid types to load.
         complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
-        transformed (bool): Whether to load transformed datasets.
 
     Returns:
         list of torch_geometric.data.Data: Combined list of PyTorch Geometric Data objects from all specified grid types.
@@ -604,10 +597,10 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False, transformed=Fa
                     pyg_dataset = get_grid_paths(data_dir, grid)
                 DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset
             else:
-                pyg_dataset = get_pyg_graphs(data_dir, grid, transformed=transformed) # Fetch real dataset
+                pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
                 DATASET_CACHE[(grid, "real", "graphs")] = pyg_dataset # Cache real dataset
             if complex:
-                pyg_dataset = create_complex_features(pyg_dataset, transformed=transformed) # Convert to complex dataset
+                pyg_dataset = create_complex_features(pyg_dataset) # Convert to complex dataset
                 DATASET_CACHE[id] = pyg_dataset # Cache complex dataset
         complete_dataset.extend(pyg_dataset)
 
@@ -618,8 +611,7 @@ def get_dataloaders(data_dir,
                     testing_grid=None,
                     batch_size=16,
                     complex=False,
-                    paths=False,
-                    transformed=False):
+                    paths=False):
     """
     Get PyTorch DataLoaders for training, validation, and testing.
     Args:
@@ -629,19 +621,18 @@ def get_dataloaders(data_dir,
         batch_size (int): Batch size for the DataLoaders.
         complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
-        transformed (bool): Whether to load transformed datasets.
 
     Returns:
         tuple: (loader_train, loader_val, loader_test) DataLoaders or dictionaries with darts TimeSeries for training, validation, and testing.
     """
-    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths, transformed=transformed)
+    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths)
 
     if testing_grid:
         # Out of distribution test on left over grid
         train_val_split = [0.75, 0.15]
         train_val_split = [x / sum(train_val_split) for x in train_val_split] # Redistribute to sum to 1
         train_split, val_split = random_split(train_dataset, train_val_split)
-        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths, transformed=transformed)
+        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths)
     else:
         train_val_test_split = [0.75, 0.15, 0.10]
         train_split, val_split, test_split = random_split(train_dataset, train_val_test_split)

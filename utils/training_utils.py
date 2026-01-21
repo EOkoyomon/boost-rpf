@@ -87,7 +87,6 @@ def plot_loss(log_dir,
         val_loss_vec (list or np.array): Validation loss values over epochs.
         fig_id (str, optional): Identifier for the figure file. Defaults to '0'.
     """
-    filename = os.path.join(log_dir, f'fig_{fig_id}.png')
     _, ax = plt.subplots()
     start = (len(train_loss_vec) // 5)*4 # Plot only last 20% of epochs
     ax.plot(train_loss_vec[start:], label = 'train loss')
@@ -97,8 +96,12 @@ def plot_loss(log_dir,
     ax.legend()
     title = f"{model_classname}"
     ax.set_title(title)
-    plt.savefig(filename)
-    print(f'Figure saved to: {filename}')
+    if log_dir:
+        filename = os.path.join(log_dir, f'fig_{fig_id}.png')
+        plt.savefig(filename)
+        print(f'Figure saved to: {filename}')
+    else:
+        plt.show()
 
 def normalized_mse_loss(pred, target, eps=1e-8):
     """
@@ -175,8 +178,7 @@ def train(model,
     # Add learning rate scheduler for physics-informed training
     # Start high to escape poor local minima, then reduce for fine-tuning
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=200,
-        min_lr=0.00001, verbose=True
+        optimizer, mode='min', factor=0.5, patience=200, min_lr=0.00001
     )
     
     loss_fn = normalized_mse_loss
@@ -374,18 +376,6 @@ def rmse_wrapped_va(y_pred, y_true, period=360.0):
 
     return torch.sqrt(torch.mean(diff ** 2, dim=0))
 
-def mape(y_pred, y_true):
-    """
-    Compute the mean absolute percentage error (MAPE) between true and predicted values.
-    Args:
-        y_pred (torch.Tensor): Predicted values of shape (N, D).
-        y_true (torch.Tensor): True values of shape (N, D).
-    Returns:
-        torch.Tensor: MAPE for each dimension (D,).
-    """
-    epsilon = 1e-8
-    return torch.mean(torch.abs((y_true - y_pred) / (torch.abs(y_true) + epsilon)), dim=0)*100
-
 def mae_wrapped_va(y_pred, y_true, period=360.0):
     """
     Compute the mean absolute error (MAE) between true and predicted values, primarily for voltage angle (va_degree).
@@ -406,25 +396,33 @@ def mae_wrapped_va(y_pred, y_true, period=360.0):
 
 def test(model,
          device,
-         loader_test):
+         loader_test,
+         plot=False):
     """
-    Evaluate a PyTorch model on a test dataset and compute RMSE and MAPE for voltage magnitude and angle.
+    Evaluate a PyTorch model on a test dataset and compute RMSE and inference time for voltage magnitude and angle.
     Args:
         model (torch.nn.Module): The PyTorch model to be evaluated.
         device (torch.device): The device to run the evaluation on (CPU or GPU).
         loader_test (torch.utils.data.DataLoader): DataLoader for the test dataset.
     Returns:
-        tuple: (rmse_vm, rmse_va, mape_vm, mape_va)
+        tuple: (rmse_vm, rmse_va, avg_inference_time_ms)
             - rmse_vm (float): RMSE for voltage magnitude (vm_pu).
             - rmse_va (float): RMSE for voltage angle (va_degree).
-            - mape_vm (float): MAPE for voltage magnitude (vm_pu) in percentage.
-            - mape_va (float): MAPE for voltage angle (va_degree) in percentage.
+            - avg_inference_time_ms (float): Average inference time per sample in milliseconds.
     """
     model.eval()
-    # TODO: MAPE doesnt give that much physically meaningful info, since voltage
-    #       already in p.u. and ref degree angle from slack is somewhat arbitrary.
-    #       Consider changing to MAE (implemented above).
-    rmse_vm = rmse_va = mape_vm = mape_va = 0
+
+    # For plotting
+    largest_error = 0
+    largest_error_pred = None
+    largest_error_true = None
+    smallest_error = np.Inf
+    smallest_error_pred = None
+    smallest_error_true = None
+
+    # For metrics
+    rmse_vm = rmse_va = 0
+    inference_time = 0
 
     if model.is_analytical():
         # Do not need to do this on GPU. Run sequentially on cpu for now.
@@ -433,22 +431,33 @@ def test(model,
         with torch.no_grad():
             for data in loader_test.dataset:
                 data = data.to(device)
+                start = time.time()
                 pred = model(data)
+                inference_time += (time.time() - start)
                 hops_to_slack = data.x.shape[-1] - 1
                 pq_mask = (data.x[:, hops_to_slack] != 0)
                 pred = pred[pq_mask]
                 true_y = data.y[pq_mask]
                 loss_rmse = rmse_wrapped_va(pred, true_y) # [vm_pu, va_degree]
-                loss_mape = mape(pred, true_y) # [vm_pu, va_degree]
                 rmse_vm += loss_rmse[0].item()
                 rmse_va += loss_rmse[1].item()
-                mape_vm += loss_mape[0].item()
-                mape_va += loss_mape[1].item()
+
+                if loss_rmse[0].item() > largest_error:
+                    largest_error = loss_rmse[0].item()
+                    largest_error_pred = pred
+                    largest_error_true = true_y
+
+                if loss_rmse[0].item() < smallest_error:
+                    smallest_error = loss_rmse[0].item()
+                    smallest_error_pred = pred
+                    smallest_error_true = true_y
     else:
         # Disable gradient tracking during testing for efficiency and correctness
         with torch.no_grad():
             for batch_test in loader_test:
                 batch_test = batch_test.to(device)
+                # TODO: Figure out inference time for batches predictions, do inference
+                # without batching, or measure during post-processing.
                 pred = model(batch_test)
                 hops_to_slack = batch_test.x.shape[-1] - 1
                 pq_mask = (batch_test.x[:, hops_to_slack] != 0)
@@ -459,18 +468,30 @@ def test(model,
                     pred = torch.cat([pred.abs(), pred.angle()], dim=1)
                     true_y = torch.cat([true_y.abs(), true_y.angle()], dim=1)
                 loss_rmse = rmse_wrapped_va(pred, true_y) # [vm_pu, va_degree]
-                loss_mape = mape(pred, true_y) # [vm_pu, va_degree]
                 rmse_vm += loss_rmse[0].item()*batch_test.num_graphs
                 rmse_va += loss_rmse[1].item()*batch_test.num_graphs
-                mape_vm += loss_mape[0].item()*batch_test.num_graphs
-                mape_va += loss_mape[1].item()*batch_test.num_graphs
+
+                # Figuring out smallest and largest is too complicated in batch mode,
+                # so just do the first and second graphs in the batch for simplicity.
+
+                if largest_error == 0:
+                    largest_error = 1
+                    end_in_first_graph = (batch_test.batch == 0).sum().item() - 1 # One less because of slack
+                    largest_error_pred = pred[:end_in_first_graph]
+                    largest_error_true = true_y[:end_in_first_graph]
+                    end_second_graph = end_in_first_graph + (batch_test.batch == 1).sum().item() - 1
+                    smallest_error_pred = pred[end_in_first_graph:end_second_graph]
+                    smallest_error_true = true_y[end_in_first_graph:end_second_graph]
 
     rmse_vm /= len(loader_test.dataset)
     rmse_va /= len(loader_test.dataset)
-    mape_vm /= len(loader_test.dataset)
-    mape_va /= len(loader_test.dataset)
+    avg_inference_time_ms = inference_time * 1000 / len(loader_test)
 
-    return rmse_vm, rmse_va, mape_vm, mape_va
+    if plot:
+        # Saved the predictions without slack bus for plotting
+        plot_predictions(smallest_error_pred, smallest_error_true, largest_error_pred, largest_error_true) # Skip slack
+
+    return rmse_vm, rmse_va, avg_inference_time_ms
 
 def train_sequential(model,
                      loader_train,
@@ -521,11 +542,48 @@ def rmse_sequential_wrapped_va(y_pred, y_true, period=360.0):
 
     return np.sqrt(np.mean(diff ** 2, axis=0))
 
+def plot_predictions(pred_smallest, true_smallest, pred_largest, true_largest):
+    plt.figure(figsize=(10,5))
+    plt.subplot(2,2,1)
+    plt.plot(true_smallest[:,0], label='True vm_pu')
+    plt.plot(pred_smallest[:,0], label='Predicted vm_pu')
+    plt.title('Voltage Magnitude Prediction with Smallest Error')
+    plt.xlabel('Time Step')
+    plt.ylabel('vm_pu')
+    plt.legend()
+
+    plt.subplot(2,2,2)
+    plt.plot(true_largest[:,0], label='True vm_pu')
+    plt.plot(pred_largest[:,0], label='Predicted vm_pu')
+    plt.title('Voltage Magnitude Prediction with Largest Error')
+    plt.xlabel('Time Step')
+    plt.ylabel('vm_pu')
+    plt.legend()
+
+    plt.subplot(2,2,3)
+    plt.plot(true_smallest[:,1], label='True va_degree')
+    plt.plot(pred_smallest[:,1], label='Predicted va_degree')
+    plt.title('Voltage Angle Prediction with Smallest Error')
+    plt.xlabel('Time Step')
+    plt.ylabel('va_degree')
+    plt.legend()
+
+    plt.subplot(2,2,4)
+    plt.plot(true_largest[:,1], label='True va_degree')
+    plt.plot(pred_largest[:,1], label='Predicted va_degree')
+    plt.title('Voltage Angle Prediction with Largest Error')
+    plt.xlabel('Time Step')
+    plt.ylabel('va_degree')
+    plt.legend()
+
+    plt.tight_layout()
+    plt.show()
+
 def test_sequential(model,
                     loader_test,
                     plot=False):
     """
-    Evaluate a sequential model on a test dataset and compute RMSE and MAPE for voltage magnitude and angle.
+    Evaluate a sequential model on a test dataset and compute RMSE and inference time for voltage magnitude and angle.
     Args:
         model (darts Model): The PyTorch model to be evaluated.
         loader_test (list[Object]): DataLoader for the test dataset.
@@ -567,49 +625,12 @@ def test_sequential(model,
         rmse_vm += loss_rmse[0]
         rmse_va += loss_rmse[1]
 
-    def plot_predictions(pred_smallest, true_smallest, pred_largest, true_largest):
-        plt.figure(figsize=(10,5))
-        plt.subplot(2,2,1)
-        plt.plot(true_smallest[:,0], label='True vm_pu')
-        plt.plot(pred_smallest[:,0], label='Predicted vm_pu')
-        plt.title('Voltage Magnitude Prediction with Smallest Error')
-        plt.xlabel('Time Step')
-        plt.ylabel('vm_pu')
-        plt.legend()
-
-        plt.subplot(2,2,2)
-        plt.plot(true_largest[:,0], label='True vm_pu')
-        plt.plot(pred_largest[:,0], label='Predicted vm_pu')
-        plt.title('Voltage Magnitude Prediction with Largest Error')
-        plt.xlabel('Time Step')
-        plt.ylabel('vm_pu')
-        plt.legend()
-
-        plt.subplot(2,2,3)
-        plt.plot(true_smallest[:,1], label='True va_degree')
-        plt.plot(pred_smallest[:,1], label='Predicted va_degree')
-        plt.title('Voltage Angle Prediction with Smallest Error')
-        plt.xlabel('Time Step')
-        plt.ylabel('va_degree')
-        plt.legend()
-
-        plt.subplot(2,2,4)
-        plt.plot(true_largest[:,1], label='True va_degree')
-        plt.plot(pred_largest[:,1], label='Predicted va_degree')
-        plt.title('Voltage Angle Prediction with Largest Error')
-        plt.xlabel('Time Step')
-        plt.ylabel('va_degree')
-        plt.legend()
-
-        plt.tight_layout()
-        plt.show()
-
-    if plot:
-        plot_predictions(smallest_error_pred[1:], smallest_error_true[1:], largest_error_pred[1:], largest_error_true[1:]) # Skip slack
-
     rmse_vm /= len(loader_test)
     rmse_va /= len(loader_test)
     avg_inference_time_ms = inference_time * 1000 / len(loader_test)
     # print(f"Average inference time per sample: {avg_inference_time_ms:.4f} milliseconds", flush=True)
+
+    if plot:
+        plot_predictions(smallest_error_pred[1:], smallest_error_true[1:], largest_error_pred[1:], largest_error_true[1:]) # Skip slack
 
     return rmse_vm, rmse_va, avg_inference_time_ms
