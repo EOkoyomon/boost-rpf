@@ -12,8 +12,8 @@ def get_paths_from_loader(loader):
 
     for sample in loader:
         for path_data in sample['paths']:
-            target_series_all.append(path_data['target_series'])
-            covariate_series_all.append(path_data['covariate_series'])
+            target_series_all.append(path_data['targets'])
+            covariate_series_all.append(path_data['features'])
     return target_series_all, covariate_series_all
 
 class XGBModelWrapper:
@@ -173,7 +173,7 @@ class XGBModelWrapper:
         """
         Predict voltages along all paths in the sample using basic scheme.
         """
-        slack_voltage_series = paths[0]['target_series'][0:1]
+        slack_voltage_series = paths[0]['targets'][0:1]
         predictions = np.ones((num_nodes, 2))
         predictions[0] = slack_voltage_series[0].flatten() # Store slack voltage
 
@@ -183,7 +183,7 @@ class XGBModelWrapper:
                 # Slack node, already stored
                 continue
             target_node = path_info['target_node']
-            covariate_series_test = TimeSeries.from_values(path_info['covariate_series'])[1:] # Exclude slack step
+            covariate_series_test = TimeSeries.from_values(path_info['features'])[1:] # Exclude slack step
             # Predict all nodes from slack to target autoregressively
             all_preds = self._predict_sequence(n=path_length-1,
                                                voltage_history=TimeSeries.from_values(slack_voltage_series),
@@ -199,7 +199,7 @@ class XGBModelWrapper:
         """
         Predict voltages along all paths in the sample using averaging scheme.
         """
-        slack_voltage_series = paths[0]['target_series'][0:1]
+        slack_voltage_series = paths[0]['targets'][0:1]
         predictions = {i: [] for i in range(num_nodes)}
         predictions[0] = [slack_voltage_series[0].flatten()] # Store slack voltage
 
@@ -209,7 +209,7 @@ class XGBModelWrapper:
             if path_length <= 1:
                 # Slack node, already stored
                 continue
-            covariate_series_test = TimeSeries.from_values(path_info['covariate_series'])[1:] # Exclude slack step
+            covariate_series_test = TimeSeries.from_values(path_info['features'])[1:] # Exclude slack step
             # Predict all nodes from slack to target autoregressively
             all_preds = self._predict_sequence(n=path_length-1,
                                                voltage_history=TimeSeries.from_values(slack_voltage_series),
@@ -231,7 +231,7 @@ class XGBModelWrapper:
         predictions = np.ones((num_nodes, 2))
 
         # Initialize slack voltage from the first path's target series
-        slack_voltage = paths[0]['target_series'][0].flatten()
+        slack_voltage = paths[0]['targets'][0].flatten()
         predictions[0] = slack_voltage
 
         for path_info in sorted_paths:
@@ -259,7 +259,7 @@ class XGBModelWrapper:
             
             # Only need covariates for parent→target edge (last 2 steps to satisfy [0] lag)
             # Get covariates with original time indices preserved
-            covariate_series = TimeSeries.from_values(path_info['covariate_series'])
+            covariate_series = TimeSeries.from_values(path_info['features'])
             target_covs = covariate_series[-2:]  # Keeps original indices
             
             # Predict single step
@@ -282,8 +282,8 @@ class XGBModelWrapper:
                 - 'sample_idx': sample_idx,
                 - 'num_nodes': num_nodes,
                 - 'paths': Dictionary with keys:
-                    - 'target_series': darts TimeSeries of targets [V_j, theta_j]
-                    - 'covariate_series': darts TimeSeries of covariates (8 features)
+                    - 'targets': darts TimeSeries of targets [V_j, theta_j]
+                    - 'features': darts TimeSeries of covariates (8 features)
                     - 'path': list of node indices
                     - 'target_node': int
                 - 'true_voltages': true_voltages,

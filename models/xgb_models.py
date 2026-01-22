@@ -9,8 +9,8 @@ def get_paths_from_loader(loader):
 
     for sample in loader:
         for path_data in sample['paths']:
-            target_series_all.append(path_data['target_series'])
-            covariate_series_all.append(path_data['covariate_series'])
+            target_series_all.append(path_data['targets'])
+            covariate_series_all.append(path_data['features'])
     return target_series_all, covariate_series_all
 
 class BiasCorrector:
@@ -32,7 +32,7 @@ class BiasCorrector:
             start = end
             for path_data in sample['paths']:
                 # Every path has one target node
-                path_length = len(path_data['target_series']) - 1  # Exclude slack step
+                path_length = len(path_data['targets']) - 1  # Exclude slack step
                 end += path_length
 
             X_samples.append(X[start:end])
@@ -43,7 +43,7 @@ class BiasCorrector:
             # target_sample = [None]*sample['num_nodes']
             # for path_data in sample['paths']:
             #     # Every path has one target node
-            #     path_length = len(path_data['target_series']) - 1  # Exclude slack step
+            #     path_length = len(path_data['targets']) - 1  # Exclude slack step
             #     end += path_length
             #     x_sample[path_data['target_node']] = X[end-1]  # Append target node's features
             #     target_sample[path_data['target_node']] = y[end-1] # Append target node's true voltage
@@ -290,7 +290,7 @@ class NativeXGBModelWrapper:
         predictions = np.zeros((num_nodes, 2))
         
         # Slack Bus initialization
-        slack_val = paths[0]['target_series'][0]
+        slack_val = paths[0]['targets'][0]
         predictions[0] = slack_val
         X_all = [None]*num_nodes
 
@@ -304,8 +304,8 @@ class NativeXGBModelWrapper:
             # 1. Get Parent Voltage (Target Lag)
             v_parent = predictions[parent_node]
             # 2. Get Branch Covariates
-            cov_parent = path_info['covariate_series'][-2]  # Covariates of the parent node/edge
-            cov_target = path_info['covariate_series'][-1] # Features of the current node/edge
+            cov_parent = path_info['features'][-2]  # Covariates of the parent node/edge
+            cov_target = path_info['features'][-1] # Features of the current node/edge
             
             X = np.concatenate([v_parent.flatten(), cov_parent.flatten(), cov_target.flatten()])
             out = self._predict_step(X.reshape(1, -1))

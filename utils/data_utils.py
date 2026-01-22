@@ -478,8 +478,8 @@ def load_precomputed_paths(data_dir, grid_type):
             covariate_series = path_data['features']
 
             sample_paths.append({
-                'target_series': target_series,
-                'covariate_series': covariate_series,
+                'targets': target_series,
+                'features': covariate_series,
                 'path': path_data['path'],
                 'target_node': path_data['target_node'],
             })
