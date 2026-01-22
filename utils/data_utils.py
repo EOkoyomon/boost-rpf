@@ -223,8 +223,10 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     V_true = data.y[:, 2].numpy()  # vm_pu
     theta_true = data.y[:, 3].numpy()  # va_degree
 
-    slack_vm_pu = data.y[slack_index, 2].numpy()
-    slack_va_degree = data.y[slack_index, 3].numpy()
+    # slack_vm_pu = data.y[slack_index, 2].numpy()
+    # slack_va_degree = data.y[slack_index, 3].numpy()
+    V_true[slack_index] = slack_vm_pu
+    theta_true[slack_index] = slack_va_degree
     
     # 2. Build Network Graph from Ybus
     G = nx.DiGraph()
