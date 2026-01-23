@@ -15,6 +15,9 @@ from models.lindistflow import (
     DistFlow,
     LinDistFlow,
 )
+from models.pg_models import (
+    get_pg_model,
+)
 from models.powerflownet import (
     PowerFlowNet,
 )
@@ -239,11 +242,12 @@ MODEL_CLASSES = {
     "xgb-absolute": XGB_Absolute,
     "xgb-parent": XGB_Parent,
     "xgb-ldf": XGB_LDF,
-    "xgb-absolute-n": XGB_Absolute_Normalized,
-    "xgb-parent-n": XGB_Parent_Normalized,
-    "xgb-ldf-n": XGB_LDF_Normalized,
-    "xgb-parent-corrected": XGB_Parent_Corrected,
+    # "xgb-absolute-n": XGB_Absolute_Normalized,
+    # "xgb-parent-n": XGB_Parent_Normalized,
+    # "xgb-ldf-n": XGB_LDF_Normalized,
+    # "xgb-parent-corrected": XGB_Parent_Corrected,
     "pfnet": PowerFlowNet,
+    "pg-transformer": get_pg_model("Transformer"),
 }
 COMPLEX_MODELS = []
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
