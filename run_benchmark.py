@@ -106,6 +106,14 @@ def parse_args():
         required=False,
         default="NormedGNN",
     )
+    parser.add_argument(
+        "--cigre",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--kerber",
+        action="store_true"
+    )
     args = parser.parse_args()
     return args
 
@@ -279,6 +287,9 @@ def run_benchmark(args):
     eval_only = args.eval_only
     load_model_dir = args.load_model_dir
     load_model_name = args.load_model_name
+    use_cigre_network = args.cigre
+    use_kerber_network = args.kerber
+    assert not (use_cigre_network and use_kerber_network), "Please select only one of --cigre or --kerber."
     
     # Set up training, logging, and experiment cases
     setup_seeds()
@@ -288,11 +299,20 @@ def run_benchmark(args):
         # Create a new log directory for each model
         log_dir = create_log_dir()
     
-    grids_to_compare = get_dist_grid_codes(scenario=1)
-    test_cases = [(grids_to_compare, None)]  # All grids scenario
-    for grid in grids_to_compare:
-        test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
-    test_cases = test_cases[:1] #+ test_cases[-4:-3] + test_cases[-1:]
+    if use_cigre_network:
+        grids_to_compare = ['CIGRE_LV']
+        test_cases = [(grids_to_compare, None)]  # All grids scenario
+    elif use_kerber_network:
+        grids_to_compare = ['Kerber_Dorfnetz']
+        test_cases = [(grids_to_compare, None)]  # All grids scenario
+    else:
+        grids_to_compare = get_dist_grid_codes(scenario=1)
+        # Only compare LV networks because radial.
+        grids_to_compare = list(filter(lambda x: 'LV' in x, grids_to_compare))
+        test_cases = [(grids_to_compare, None)]  # All grids scenario
+        for grid in grids_to_compare:
+            test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
+        test_cases = test_cases[:1] #+ test_cases[-4:-3] + test_cases[-1:]
 
     # Set up results tracking
     if save_results and log_dir:
@@ -352,7 +372,16 @@ def run_benchmark(args):
             else:
                 loader_train, loader_val, loader_test = loader_train_real, loader_val_real, loader_test_real
             print('\n--------------------------------------------------', flush=True)
-            print(f'\nEvaluating model: {model.__name__} | Testing grid: {testing_grid if testing_grid else "All Grids"}', flush=True)
+            case_name = ''
+            if testing_grid:
+                case_name = testing_grid
+            elif use_cigre_network:
+                case_name = 'CIGRE_LV'
+            elif use_kerber_network:
+                case_name = 'Kerber_Dorfnetz'
+            else:
+                case_name = 'all'
+            print(f'\nEvaluating model: {model.__name__} | Testing grid: {case_name}', flush=True)
             # Train and test model
             if model in ANALYTICAL_MODELS:
                 rmse_vm, rmse_va, inference_time_ms = test(model(), get_device(), loader_test)
@@ -370,7 +399,7 @@ def run_benchmark(args):
                                         plot=plot,
                                         save_model=save_model,
                                         eval_only=eval_only,
-                                        experiment_id=f"{model.__name__}_{testing_grid if testing_grid else 'all'}")
+                                        experiment_id=f"{model.__name__}_{case_name}")
             else:
                 rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms = \
                     evaluate_performance(model_class=model,
@@ -385,13 +414,13 @@ def run_benchmark(args):
                                         save_model=save_model,
                                         eval_only=eval_only,
                                         load_model_dir=load_model_dir,
-                                        model_load_experiment_id=f"{load_model_name}_{testing_grid if testing_grid else 'all'}",
-                                        experiment_id=f"{model.__name__}_{testing_grid if testing_grid else 'all'}")
+                                        model_load_experiment_id=f"{load_model_name}_{case_name}",
+                                        experiment_id=f"{model.__name__}_{case_name}")
             
             results.append(
                 (
                     model.__name__,
-                    testing_grid if testing_grid else 'all',
+                    case_name,
                     rmse_vm,
                     rmse_va,
                     best_val_loss,
