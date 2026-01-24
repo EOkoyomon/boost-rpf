@@ -223,7 +223,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     V_true = data.y[:, 2].numpy()  # vm_pu
     theta_true = data.y[:, 3].numpy()  # va_degree
 
-    # slack_vm_pu = data.y[slack_index, 2].numpy()
+    slack_vm_pu = data.y[slack_index, 2].numpy()
     # slack_va_degree = data.y[slack_index, 3].numpy()
     V_true[slack_index] = slack_vm_pu
     theta_true[slack_index] = slack_va_degree
@@ -248,6 +248,8 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     # Pre-fetch edge attributes
     edge_r = nx.get_edge_attributes(G, 'r')
     edge_x = nx.get_edge_attributes(G, 'x')
+
+    # degrees_dict = dict(G.degree())
     
     # 4. Backward Sweep - Compute aggregated power (P_agg, Q_agg)
     sorted_nodes = sorted(paths.keys(), key=lambda n: len(paths[n]))
@@ -319,6 +321,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
         # Feature vector: [r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
         # Note: V_i, theta_i are NOT included - they come from target lags
         features = np.zeros((path_length, 8))
+        # features = np.zeros((path_length, 9)) # Added one more feature for node degree
         targets = np.zeros((path_length, 2))  # [V_j, theta_j]
         
         for step_idx, j in enumerate(path):
@@ -348,6 +351,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
             features[step_idx, 5] = Q_agg[j]  # Aggregated Q
             features[step_idx, 6] = V_LDF[j]  # LinDistFlow V estimate
             features[step_idx, 7] = theta_LDF_deg[j]  # LinDistFlow theta estimate
+            # features[step_idx, 8] = degrees_dict[j]  # Node degree
             
             # Target: true voltage at node j
             if j < num_pyg_nodes:
