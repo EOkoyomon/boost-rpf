@@ -174,12 +174,17 @@ def train(model,
     """
     # Configure hyperparameters
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, nesterov=True)
     
     # Add learning rate scheduler for physics-informed training
     # Start high to escape poor local minima, then reduce for fine-tuning
     # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #     optimizer, mode='min', factor=0.5, patience=200, min_lr=0.00001
+    #     optimizer, mode='min', factor=0.1, patience=patience//3, min_lr=learning_rate*0.01
     # )
+    # OneCycleLR is great for "jumping" over poor local minima early on
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=learning_rate, steps_per_epoch=len(loader_train), epochs=epochs
+    )
     
     # loss_fn = normalized_mse_loss
     # Standard MSE loss (not normalized)
@@ -222,14 +227,28 @@ def train(model,
         
         for batch_train in loader_train:
             optimizer.zero_grad()
-            batch_train = batch_train.to(device)
-            pred = model(batch_train)
-            hops_to_slack = batch_train.x.shape[-1] - 1
-            pq_mask = (batch_train.x[:, hops_to_slack] != 0)
-            loss = loss_fn(pred[pq_mask], batch_train.y[pq_mask])
+            if hasattr(model, 'is_tabular') and model.is_tabular():
+                # Tabular model input
+                inputs, outputs = batch_train
+                x_train = inputs.to(device)
+                y_train = outputs.to(device)
+                predictions = model(x_train)[2:].view(-1,2) # Skip slack bus
+                ground_truth = y_train[2:].view(-1,2) # Skip slack bus
+                num_graphs = inputs.shape[0] # Batch size
+            else:
+                # Graph model input
+                batch_train = batch_train.to(device)
+                pred = model(batch_train)
+                hops_to_slack = batch_train.x.shape[-1] - 1
+                pq_mask = (batch_train.x[:, hops_to_slack] != 0)
+                predictions = pred[pq_mask]
+                ground_truth = batch_train.y[pq_mask]
+                num_graphs = batch_train.num_graphs
+            loss = loss_fn(predictions, ground_truth)
             loss.backward()
             optimizer.step()
-            loss_train += loss.item()*batch_train.num_graphs
+            scheduler.step()
+            loss_train += loss.item()*num_graphs
         loss_train /= len(loader_train.dataset)
 
         # Validate
@@ -239,12 +258,23 @@ def train(model,
         # Disable gradient tracking during validation for efficiency
         with torch.no_grad():
             for batch_val in loader_val:
-                batch_val = batch_val.to(device)
-                pred = model(batch_val)
-                hops_to_slack = batch_val.x.shape[-1] - 1
-                pq_mask = (batch_val.x[:, hops_to_slack] != 0)
-                loss = loss_fn(pred[pq_mask], batch_val.y[pq_mask])
-                loss_val += loss.item()*batch_val.num_graphs
+                if hasattr(model, 'is_tabular') and model.is_tabular():
+                    inputs, outputs = batch_val
+                    x_val = inputs.to(device)
+                    y_val = outputs.to(device)
+                    predictions = model(x_val)[2:].view(-1,2) # Skip slack bus
+                    ground_truth = y_val[2:].view(-1,2) # Skip slack bus
+                    num_graphs = inputs.shape[0] # Batch size
+                else:
+                    batch_val = batch_val.to(device)
+                    pred = model(batch_val)
+                    hops_to_slack = batch_val.x.shape[-1] - 1
+                    pq_mask = (batch_val.x[:, hops_to_slack] != 0)
+                    predictions = pred[pq_mask]
+                    ground_truth = batch_val.y[pq_mask]
+                    num_graphs = batch_val.num_graphs
+                loss = loss_fn(predictions, ground_truth)
+                loss_val += loss.item()*num_graphs
         loss_val /= len(loader_val.dataset)
 
         # Early stopping and update of best model
@@ -455,33 +485,61 @@ def test(model,
         # Disable gradient tracking during testing for efficiency and correctness
         with torch.no_grad():
             for batch_test in loader_test:
-                batch_test = batch_test.to(device)
-                # TODO: Figure out inference time for batches predictions, do inference
-                # without batching, or measure during post-processing.
-                pred = model(batch_test)
-                hops_to_slack = batch_test.x.shape[-1] - 1
-                pq_mask = (batch_test.x[:, hops_to_slack] != 0)
-                pred = pred[pq_mask]
-                true_y = batch_test.y[pq_mask]
+                if hasattr(model, 'is_tabular') and model.is_tabular():
+                    inputs, outputs = batch_test
+                    x_test = inputs.to(device)
+                    y_test = outputs.to(device)
+
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    start = time.time()
+
+                    pred = model(x_test)
+
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    inference_time += (time.time() - start)
+                    
+                    pred = pred[2:].view(-1,2) # Skip slack bus
+                    true_y = y_test[2:].view(-1,2) # Skip slack bus
+                    num_graphs = inputs.shape[0] # Batch size
+                else:
+                    batch_test = batch_test.to(device)
+                    # TODO: Figure out inference time for batches predictions, do inference
+                    # without batching, or measure during post-processing.
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    start = time.time()
+                    
+                    pred = model(batch_test)
+
+                    if torch.cuda.is_available():
+                        torch.cuda.synchronize()
+                    inference_time += (time.time() - start)
+
+                    hops_to_slack = batch_test.x.shape[-1] - 1
+                    pq_mask = (batch_test.x[:, hops_to_slack] != 0)
+                    pred = pred[pq_mask]
+                    true_y = batch_test.y[pq_mask]
+                    num_graphs = batch_test.num_graphs
                 if model.is_complex():
                     # For complex models, convert complex voltage to [vm_pu, va_degree]
                     pred = torch.cat([pred.abs(), pred.angle()], dim=1)
                     true_y = torch.cat([true_y.abs(), true_y.angle()], dim=1)
                 loss_rmse = rmse_wrapped_va(pred, true_y) # [vm_pu, va_degree]
-                rmse_vm += loss_rmse[0].item()*batch_test.num_graphs
-                rmse_va += loss_rmse[1].item()*batch_test.num_graphs
+                rmse_vm += loss_rmse[0].item()*num_graphs
+                rmse_va += loss_rmse[1].item()*num_graphs
 
                 # Figuring out smallest and largest is too complicated in batch mode,
                 # so just do the first and second graphs in the batch for simplicity.
 
-                if largest_error == 0:
+                if plot and largest_error == 0:
                     largest_error = 1
-                    end_in_first_graph = (batch_test.batch == 0).sum().item() - 1 # One less because of slack
-                    largest_error_pred = pred[:end_in_first_graph]
-                    largest_error_true = true_y[:end_in_first_graph]
-                    end_second_graph = end_in_first_graph + (batch_test.batch == 1).sum().item() - 1
-                    smallest_error_pred = pred[end_in_first_graph:end_second_graph]
-                    smallest_error_true = true_y[end_in_first_graph:end_second_graph]
+                    num_points = min(100, len(pred)) // 2 # Pick first 100 points for plotting. Arbitrary.
+                    largest_error_pred = pred[:num_points]
+                    largest_error_true = true_y[:num_points]
+                    smallest_error_pred = pred[num_points:num_points*2]
+                    smallest_error_true = true_y[num_points:num_points*2]
 
     rmse_vm /= len(loader_test.dataset)
     rmse_va /= len(loader_test.dataset)

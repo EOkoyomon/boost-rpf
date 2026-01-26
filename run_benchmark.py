@@ -15,6 +15,9 @@ from models.lindistflow import (
     DistFlow,
     LinDistFlow,
 )
+from models.mlp import (
+    NormedMLP,
+)
 from models.pg_models import (
     get_pg_model,
 )
@@ -58,7 +61,8 @@ def parse_args():
     )
     parser.add_argument(
         "--model",
-        default="xgb-basic",
+        default=["n-gnn"],
+        nargs="+",
         choices=["ALL"] + list(MODEL_CLASSES.keys()),
     )
     parser.add_argument(
@@ -256,6 +260,7 @@ MODEL_CLASSES = {
     # "xgb-parent-corrected": XGB_Parent_Corrected,
     "pfnet": PowerFlowNet,
     "pg-transformer": get_pg_model("Transformer"),
+    "mlp": NormedMLP,
 }
 COMPLEX_MODELS = []
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
@@ -269,12 +274,13 @@ SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGB_Parent_Normalized,
                      XGB_LDF_Normalized,
                      XGB_Parent_Corrected]
-REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(COMPLEX_MODELS) - set(SEQUENTIAL_MODELS)
+TABULAR_MODELS = [NormedMLP]
+REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(COMPLEX_MODELS) - set(SEQUENTIAL_MODELS) - set(TABULAR_MODELS)
 
 def run_benchmark(args):
     # Argument parsing and validation
     if args.load_model_dir:
-        assert args.model.upper() != 'ALL', "When loading a model, please specify a single model type, not 'ALL'."
+        assert len(args.model) == 1 and args.model[0].upper() != 'ALL', "When loading a model, please specify a single model type, not 'ALL'."
 
     data_dir = args.data_dir
     batch_size = args.batch_size
@@ -312,7 +318,7 @@ def run_benchmark(args):
         test_cases = [(grids_to_compare, None)]  # All grids scenario
         for grid in grids_to_compare:
             test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
-        test_cases = test_cases[:1] #+ test_cases[-4:-3] + test_cases[-1:]
+        # test_cases = test_cases[:1] #+ test_cases[-4:-3] + test_cases[-1:]
 
     # Set up results tracking
     if save_results and log_dir:
@@ -332,7 +338,11 @@ def run_benchmark(args):
         pd.DataFrame(columns=column_names).to_csv(results_file)
         print(f'\nResults will be saved to: {results_file}\n', flush=True)
 
-    models_to_evaluate = [MODEL_CLASSES[args.model]] if args.model.upper() != 'ALL' else list(MODEL_CLASSES.values())
+    models_to_evaluate = []
+    if len(args.model) == 1 and args.model[0].upper() == 'ALL':
+        models_to_evaluate = list(MODEL_CLASSES.values())
+    else:
+        models_to_evaluate = [MODEL_CLASSES[m] for m in args.model]
 
     # Run evaluations
     for training_grids, testing_grid in test_cases:
@@ -341,6 +351,7 @@ def run_benchmark(args):
         need_real_valued_data = len(set(models_to_evaluate) & set(REAL_VALUED_GRAPH_MODELS)) > 0
         need_complex_valued_data = len(set(models_to_evaluate) & set(COMPLEX_MODELS)) > 0
         need_real_valued_path_data = len(set(models_to_evaluate) & set(SEQUENTIAL_MODELS)) > 0
+        need_real_valued_tabular_data = len(set(models_to_evaluate) & set(TABULAR_MODELS)) > 0
 
         # If no real models are being evaluated, skip loading real data
         if need_real_valued_data:
@@ -360,6 +371,12 @@ def run_benchmark(args):
                 data_dir, training_grids, testing_grid, batch_size=batch_size, paths=True
             )
 
+        # If no tabular models are being evaluated, skip loading tabular data
+        if need_real_valued_tabular_data:
+            loader_train_tabular, loader_val_tabular, loader_test_tabular = get_dataloaders(
+                data_dir, training_grids, testing_grid, batch_size=batch_size, tabular=True
+            )
+
         # Keep track of results
         results = []
 
@@ -369,6 +386,8 @@ def run_benchmark(args):
                 loader_train, loader_val, loader_test = loader_train_complex, loader_val_complex, loader_test_complex
             elif model in SEQUENTIAL_MODELS:
                 loader_train, loader_val, loader_test = loader_train_path, loader_val_path, loader_test_path
+            elif model in TABULAR_MODELS:
+                loader_train, loader_val, loader_test = loader_train_tabular, loader_val_tabular, loader_test_tabular
             else:
                 loader_train, loader_val, loader_test = loader_train_real, loader_val_real, loader_test_real
             print('\n--------------------------------------------------', flush=True)

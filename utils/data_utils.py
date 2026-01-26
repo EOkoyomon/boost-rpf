@@ -10,9 +10,9 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
-from darts import TimeSeries
 from scipy.sparse import find
-from torch.utils.data import random_split
+from torch.utils.data import random_split, TensorDataset
+from torch.utils.data import DataLoader as TabularDataLoader
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import to_networkx
@@ -79,9 +79,7 @@ def transform_dataset(dataset, add_hops=True, grid_name=None):
     Transform the dataset to:
     1. Store slack bus info globally (vm_pu, va_degree, connection impedances)
     2. Remove bus type encodings (Slack?, PV?, PQ?)
-    3. Remove vm_pu and va_degree from input features since they are unknowns for PQ buses.
-    4. Remove p_mw and q_mvar from labels since they are not predicted for PQ buses.
-    5. Simplify edge attributes to [r_pu, x_pu]
+    3. Remove p_mw and q_mvar from labels since they are not predicted for PQ buses.
     
     Args:
         dataset: List of PyTorch Geometric Data objects
@@ -371,6 +369,44 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     
     return path_data_list
 
+def get_tabular_data(data_dir, grid_type):
+    graph_dataset = get_pyg_graphs(data_dir, grid_type)
+
+    MAX_NODES = 129 # LV Rural3
+    MAX_EDGES = 129 # LV Rural3
+    DIM_NODE_FEATURES = graph_dataset[0].x.shape[1] # 5
+    DIM_EDGE_FEATURES = graph_dataset[0].edge_attr.shape[1] # 4
+    DIM_OUTPUT_FEATURES = graph_dataset[0].y.shape[1] # 2
+
+    # tabular_dataset = []
+    x_data = []
+    y_data = []
+
+    for data in graph_dataset:
+        # Build fixed-size input feature vector
+        inputs = np.zeros(MAX_NODES * DIM_NODE_FEATURES + MAX_EDGES * DIM_EDGE_FEATURES)
+
+        # Add node features
+        flattened_node_features = data.x.numpy().flatten()
+        inputs[:len(flattened_node_features)] = flattened_node_features
+
+        # Add edge features
+        flattened_edge_features = data.edge_attr[::2, :].numpy().flatten()
+        inputs[MAX_NODES * DIM_NODE_FEATURES:MAX_NODES * DIM_NODE_FEATURES + len(flattened_edge_features)] = flattened_edge_features
+
+        # Create fixed-size output vector
+        outputs = np.zeros(MAX_NODES * DIM_OUTPUT_FEATURES)
+
+        # Add output targets
+        flattened_targets = data.y.numpy().flatten()
+        outputs[:len(flattened_targets)] = flattened_targets
+
+        # Append to grid lists
+        # tabular_dataset.append((grid_features, grid_targets))
+        x_data.append(inputs)
+        y_data.append(outputs)
+
+    return TensorDataset(torch.tensor(x_data, dtype=torch.float32), torch.tensor(y_data, dtype=torch.float32))
 
 def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.0):
     """
@@ -408,7 +444,7 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
     dataset_path = os.path.join(data_dir, grid_type, 'train', 'dataset_with_ppci.pt')
     raw_dataset = torch.load(dataset_path, weights_only=False)
     
-    # Feature and target column names for darts TimeSeries
+    # Feature and target column names
     # Note: V_i, theta_i are NOT included - they come from target lags
     feature_names = [
         'r_ij', 'x_ij', 
@@ -442,10 +478,10 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
 
 def load_precomputed_paths(data_dir, grid_type):
     """
-    Load pre-computed path data from disk and convert to TimeSeries format.
+    Load pre-computed path data from disk.
 
     This is much faster than get_grid_paths() because the expensive path extraction
-    and feature computation is already done. Only TimeSeries creation happens here.
+    and feature computation is already done.
 
     Args:
         data_dir (str): Base directory where datasets are stored.
@@ -473,7 +509,7 @@ def load_precomputed_paths(data_dir, grid_type):
     target_names = save_data['target_names']
     samples = save_data['samples']
 
-    # Convert numpy arrays to TimeSeries
+    # Convert numpy arrays to desired format
     all_samples = []
 
     for sample in tqdm(samples):
@@ -561,7 +597,7 @@ def create_complex_features(dataset):
 
     return complex_dataset
 
-def get_dataset(data_dir, grid_types, complex=False, paths=False):
+def get_dataset(data_dir, grid_types, complex=False, paths=False, tabular=False):
     """
     Load and cache datasets for the specified grid types.
     Args:
@@ -569,6 +605,7 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False):
         grid_types (list of str): List of grid types to load.
         complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
+        tabular (bool): Whether to load tabular datasets.
 
     Returns:
         list of torch_geometric.data.Data: Combined list of PyTorch Geometric Data objects from all specified grid types.
@@ -576,7 +613,7 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False):
     complete_dataset = []
     for grid in grid_types:
         pyg_dataset = None
-        id = (grid, "complex" if complex else "real", "paths" if paths else "graphs")
+        id = (grid, "complex" if complex else "real", "paths" if paths else "tabular" if tabular else "graphs")
         if id in DATASET_CACHE:
             pyg_dataset = DATASET_CACHE[id]
         else:
@@ -591,6 +628,9 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False):
                     print(f'  Hint: Run "python precompute_paths.py --data_dir {data_dir}" to speed up future loads.')
                     pyg_dataset = get_grid_paths(data_dir, grid)
                 DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset
+            elif tabular:
+                pyg_dataset = get_tabular_data(data_dir, grid)
+                DATASET_CACHE[(grid, "real", "tabular")] = pyg_dataset
             else:
                 pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
                 DATASET_CACHE[(grid, "real", "graphs")] = pyg_dataset # Cache real dataset
@@ -606,7 +646,8 @@ def get_dataloaders(data_dir,
                     testing_grid=None,
                     batch_size=16,
                     complex=False,
-                    paths=False):
+                    paths=False,
+                    tabular=False):
     """
     Get PyTorch DataLoaders for training, validation, and testing.
     Args:
@@ -616,32 +657,43 @@ def get_dataloaders(data_dir,
         batch_size (int): Batch size for the DataLoaders.
         complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
-
+        tabular (bool): Whether to load tabular datasets.
     Returns:
-        tuple: (loader_train, loader_val, loader_test) DataLoaders or dictionaries with darts TimeSeries for training, validation, and testing.
+        tuple: (loader_train, loader_val, loader_test) DataLoaders or Numpy Arrays.
     """
-    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths)
+    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths, tabular=tabular)
 
     if testing_grid:
         # Out of distribution test on left over grid
         train_val_split = [0.75, 0.15]
         train_val_split = [x / sum(train_val_split) for x in train_val_split] # Redistribute to sum to 1
         train_split, val_split = random_split(train_dataset, train_val_split)
-        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths)
+        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths, tabular=tabular)
     else:
         train_val_test_split = [0.75, 0.15, 0.10]
         train_split, val_split, test_split = random_split(train_dataset, train_val_test_split)
 
     if paths:
         return train_split, val_split, test_split
-
-    loader_train = DataLoader(train_split,
-                              batch_size=batch_size,
-                              shuffle=True)
-    loader_val = DataLoader(val_split,
-                            batch_size=batch_size,
-                            shuffle=True)
-    loader_test = DataLoader(test_split,
-                             batch_size=batch_size,
-                             shuffle=True)
-    return loader_train, loader_val, loader_test
+    elif tabular:
+        loader_train = TabularDataLoader(train_split,
+                                  batch_size=batch_size,
+                                  shuffle=True)
+        loader_val = TabularDataLoader(val_split,
+                                batch_size=batch_size,
+                                shuffle=True)
+        loader_test = TabularDataLoader(test_split,
+                                 batch_size=batch_size,
+                                 shuffle=True)
+        return loader_train, loader_val, loader_test
+    else:
+        loader_train = DataLoader(train_split,
+                                batch_size=batch_size,
+                                shuffle=True)
+        loader_val = DataLoader(val_split,
+                                batch_size=batch_size,
+                                shuffle=True)
+        loader_test = DataLoader(test_split,
+                                batch_size=batch_size,
+                                shuffle=True)
+        return loader_train, loader_val, loader_test
