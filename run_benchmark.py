@@ -143,6 +143,13 @@ def evaluate_performance(model_class,
     early_stopping=True
     best_val_weights=True
     print(f'\n{locals()}', flush=True)
+    if log_dir:
+        # Log locals to config file
+        config_path = os.path.join(log_dir, f'config_{experiment_id}.txt')
+        with open(config_path, 'w') as f:
+            for key, value in locals().items():
+                f.write(f'{key}: {value}\n')
+
 
     model_weights_path = ''
     if save_model:
