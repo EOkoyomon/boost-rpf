@@ -12,11 +12,12 @@ class GlobalMLP(nn.Module):
     MAX_EDGE_FEATURES = 129 * 4
     MAX_OUTPUT_FEATURES = 129 * 2
 
-    def __init__(self, node_dim_in=MAX_NODE_FEATURES, edge_dim_in=MAX_EDGE_FEATURES, out_dim=MAX_OUTPUT_FEATURES, hidden_dim=256):
+    def __init__(self, node_dim_in=MAX_NODE_FEATURES, edge_dim_in=MAX_EDGE_FEATURES, out_dim=MAX_OUTPUT_FEATURES, hidden_dim=256, dropout=0.0):
         super().__init__()
 
         # Activations
         self.leakyReLU = nn.LeakyReLU(0.2)
+        self.dropout = dropout
 
         # Pre-processing layers (64 units as per Hansen et al.)
         self.bus_preprocess = nn.Linear(node_dim_in, hidden_dim // 2)
@@ -61,6 +62,7 @@ class GlobalMLP(nn.Module):
 
         # Processing
         out = self.leakyReLU(self.dense1(out))
+        out = nn.functional.dropout(out, self.dropout, training=self.training) # Added dropout parameter
         out = self.leakyReLU(self.dense2(out))
         out = self.readout(out)
 

@@ -60,17 +60,17 @@ def get_device():
     )
     return device
 
-def get_dist_grid_codes(scenario=1):
+def get_lv_grid_codes(scenario=1):
     """
-    Get distribution grid codes for a specific scenario.
+    Get lv distribution grid codes for a specific scenario.
     Args:
         scenario (int, optional): Scenario number for Simbench. Defaults to 1.
     Returns:
         list: Sorted list of distribution grid codes.
     """
-    # Create the codes for the distribution grid cases of Simbench (LV and MV and any combination of the two)
+    # Create the codes for the distribution grid cases of Simbench (LV)
     codes = sb.collect_all_simbench_codes(scenario=scenario)
-    dist_grid_codes = list(filter(lambda x: "no_sw" in x and ("-MV-" in x or "-LV-" in x), codes))
+    dist_grid_codes = list(filter(lambda x: "no_sw" in x and "-LV-" in x, codes))
     return sorted(dist_grid_codes)
 
 def plot_loss(log_dir,

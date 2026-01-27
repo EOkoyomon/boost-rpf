@@ -46,7 +46,7 @@ from utils.data_utils import get_dataloaders
 from utils.training_utils import (
     create_log_dir,
     get_device,
-    get_dist_grid_codes,
+    get_lv_grid_codes,
     get_model_save_path,
     plot_loss,
     setup_seeds,
@@ -344,9 +344,8 @@ def run_benchmark(args):
         grids_to_compare = ['Kerber_Dorfnetz']
         test_cases = [(grids_to_compare, None)]  # All grids scenario
     else:
-        grids_to_compare = get_dist_grid_codes(scenario=1)
-        # Only compare LV networks because radial.
-        grids_to_compare = list(filter(lambda x: 'LV' in x, grids_to_compare))
+        # Only compare LV networks because radial
+        grids_to_compare = get_lv_grid_codes(scenario=1)
         test_cases = [(grids_to_compare, None)]  # All grids scenario
         for grid in grids_to_compare:
             test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios

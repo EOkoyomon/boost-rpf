@@ -14,7 +14,7 @@ from darts.models import XGBModel
 
 from models.models import NativeXGBModelWrapper, XGB_Absolute, XGB_LDF, XGB_Parent, XGBModel_Linear
 from utils.data_utils import get_dataloaders
-from utils.training_utils import get_dist_grid_codes, setup_seeds, test_sequential, train_sequential
+from utils.training_utils import get_lv_grid_codes, setup_seeds, test_sequential, train_sequential
 import xgboost as xgb
 
 
@@ -102,7 +102,7 @@ def run_tuning(args):
     
     # Load data
     print("Loading data...")
-    grids = get_dist_grid_codes(scenario=1)
+    grids = get_lv_grid_codes(scenario=1)
     loader_train, loader_val, loader_test = get_dataloaders(
         args.data_dir, grids[:-1], testing_grid=grids[-1], batch_size=16, paths=True
     )

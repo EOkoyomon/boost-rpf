@@ -11,13 +11,11 @@ Usage:
 import argparse
 import os
 import pickle
+
 from tqdm import tqdm
 
-import numpy as np
-
-from utils.training_utils import get_dist_grid_codes
-from utils.data_utils import _extract_paths_from_sample, get_grid_paths
-import torch
+from utils.data_utils import get_grid_paths
+from utils.training_utils import get_lv_grid_codes
 
 
 def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.0):
@@ -71,7 +69,7 @@ def main():
     if args.grids:
         grids = args.grids
     else:
-        grids = get_dist_grid_codes(scenario=1)
+        grids = get_lv_grid_codes(scenario=1)
     
     print(f"Pre-computing paths for {len(grids)} grids...")
     
