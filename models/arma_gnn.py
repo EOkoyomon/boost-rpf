@@ -19,8 +19,8 @@ class ARMA_GNN(nn.Module):
         # Pre-processing layers
         self.predense1_node = nn.Linear(self.input_dim, 64)
         self.predense2_node = nn.Linear(64, 64)
-        self.predense1_edge = nn.Linear(edge_feat_dim, 16)
-        self.predense2_edge = nn.Linear(16, 1)
+        # self.predense1_edge = nn.Linear(edge_feat_dim, 16)
+        # self.predense2_edge = nn.Linear(16, 1)
 
         # ARMA layers
         self.arma = ARMAConv(64, 64, num_stacks=5, num_layers=self.num_arma_layers, shared_weights=False, act=self.leakyReLU, dropout=0.0, bias=True)
