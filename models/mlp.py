@@ -12,7 +12,7 @@ class GlobalMLP(nn.Module):
     MAX_EDGE_FEATURES = 129 * 4
     MAX_OUTPUT_FEATURES = 129 * 2
 
-    def __init__(self, node_dim_in=MAX_NODE_FEATURES, edge_dim_in=MAX_EDGE_FEATURES, out_dim=MAX_OUTPUT_FEATURES, hidden_dim=128):
+    def __init__(self, node_dim_in=MAX_NODE_FEATURES, edge_dim_in=MAX_EDGE_FEATURES, out_dim=MAX_OUTPUT_FEATURES, hidden_dim=256):
         super().__init__()
 
         # Activations
