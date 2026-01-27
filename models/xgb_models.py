@@ -1,3 +1,4 @@
+import joblib
 import numpy as np
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
@@ -342,6 +343,19 @@ class NativeXGBModelWrapper:
         # Only using the linear method going forward for NativeXGBModelWrapper.
         raise NotImplementedError(f"Scheme {self.prediction_scheme} not implemented.")
     
+    def save(self, filepath):
+        """Saves the entire wrapper state, including scalers and sub-models."""
+        if not self._is_fitted:
+            print("Warning: Saving a model that hasn't been fitted yet.")
+
+        joblib.dump(self, filepath)
+        print(f"Model saved to {filepath}")
+
+    @classmethod
+    def load(cls, filepath):
+        """Loads the wrapper from a file."""
+        return joblib.load(filepath)
+
 class XGB_Absolute(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
                  normalize=False):

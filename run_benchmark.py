@@ -112,7 +112,6 @@ def parse_args():
     parser.add_argument(
         "--load_model_name",
         required=False,
-        default="NormedGNN",
     )
     parser.add_argument(
         "--cigre",
@@ -211,9 +210,12 @@ def evaluate_performance_sequential(model_class,
                                     epochs=100,
                                     learning_rate=0.001,
                                     patience=50,
+                                    log_dir=None,
                                     plot=False,
                                     save_model=False,
                                     eval_only=False,
+                                    load_model_dir=None,
+                                    model_load_experiment_id='0',
                                     experiment_id='0'):
     """
     Evaluate sequential models that operate on path sequences.
@@ -235,13 +237,30 @@ def evaluate_performance_sequential(model_class,
     Returns:
         Tuple of (rmse_vm, rmse_va, mape_vm, mape_va, best_val_loss, train_loss, epochs, train_time)
     """
+
+    if save_model:
+        assert log_dir, 'Need to pass a log_dir path in order to save model or plot loss'
+        save_model_path = get_model_save_path(log_dir, experiment_id, sequential=True)
+
     # Create model
-    model = model_class()
+    if load_model_dir:
+
+        load_model_path = get_model_save_path(load_model_dir,
+                                              model_id=model_load_experiment_id,
+                                              sequential=True)
+        model = model_class.load(load_model_path)
+    else:
+        model = model_class()
 
     # Train the model
-    train_time, validation_error = train_sequential(model=model,
-                                  loader_train=loader_train,
-                                  loader_val=loader_val)
+    train_time = validation_error = -1
+    if not eval_only:
+        train_time, validation_error = train_sequential(model=model,
+                                    loader_train=loader_train,
+                                    loader_val=loader_val)
+
+    if save_model:
+        model.save(save_model_path)
 
     # Test the model
     rmse_vm, rmse_va, inference_time_ms = test_sequential(model=model,
@@ -428,9 +447,12 @@ def run_benchmark(args):
                                         epochs=epochs,
                                         learning_rate=learning_rate,
                                         patience=patience,
+                                        log_dir=log_dir,
                                         plot=plot,
                                         save_model=save_model,
                                         eval_only=eval_only,
+                                        load_model_dir=load_model_dir,
+                                        model_load_experiment_id=f"{load_model_name if load_model_name else model.__name__}_{case_name}",
                                         experiment_id=f"{model.__name__}_{case_name}")
             else:
                 rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms = \
@@ -446,7 +468,7 @@ def run_benchmark(args):
                                         save_model=save_model,
                                         eval_only=eval_only,
                                         load_model_dir=load_model_dir,
-                                        model_load_experiment_id=f"{load_model_name}_{case_name}",
+                                        model_load_experiment_id=f"{load_model_name if load_model_name else model.__name__}_{case_name}",
                                         experiment_id=f"{model.__name__}_{case_name}")
             
             results.append(

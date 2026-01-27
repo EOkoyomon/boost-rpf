@@ -24,24 +24,24 @@ def create_log_dir():
     os.makedirs(log_dir, exist_ok=True)
     return log_dir
 
-def get_model_save_path(log_dir, model_id='0'):
+def get_model_save_path(log_dir, model_id='0', sequential=False):
     """
     Generate a file path for saving model weights.
-    The file is named 'model_weights_<model_id>.pt' and is located in the logging directory.
+    The file is named 'model_weights_<model_id>.<pth|joblib>' and is located in the logging directory.
     Args:
         log_dir (str): Path to the logging directory.
         model_id (str, optional): Identifier for the model version. Defaults to '0'.
     Returns:
         str: Full path to the model weights file.
     """
-    return os.path.join(log_dir, f'model_weights_{model_id}')
+    return os.path.join(log_dir, f'model_weights_{model_id}{".joblib" if sequential else ".pth"}')
 
-def setup_seeds():
+def setup_seeds(seed=12):
     """
     Set random seeds for reproducibility.
     """
-    torch.manual_seed(12)
-    np.random.seed(12)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
     return
 
 def get_device():
