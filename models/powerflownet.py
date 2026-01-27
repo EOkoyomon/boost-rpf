@@ -223,7 +223,7 @@ class PowerFlowNet(nn.Module):
             (torch.Tensor): Output node embeddings (num_nodes, output_dim).
         """
         # Input feature dimensions:
-        # x: [Slack?, PV?, PQ?, p_mw, q_mvar, vm_pu, va_degree]
+        # x: [p_mw, q_mvar, vm_pu, va_degree, hops_to_slack]
         # edge_attr: [trafo?, r_pu, x_pu, sc_voltage]
         assert data.x.shape[-1] == self.nfeature_dim
         assert data.edge_attr.shape[-1] == self.efeature_dim

@@ -543,7 +543,10 @@ def test(model,
 
     rmse_vm /= len(loader_test.dataset)
     rmse_va /= len(loader_test.dataset)
-    avg_inference_time_ms = inference_time * 1000 / len(loader_test)
+    if model.is_analytical():
+        avg_inference_time_ms = inference_time * 1000 / len(loader_test.dataset)
+    else:
+        avg_inference_time_ms = inference_time * 1000 / len(loader_test)
 
     if plot:
         largest_error_pred = largest_error_pred.cpu().numpy()

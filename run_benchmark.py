@@ -274,7 +274,7 @@ def evaluate_performance_sequential(model_class,
 # Get models to evaluate
 MODEL_CLASSES = {
     # "dist-flow": DistFlow,
-    # "lin-dist-flow": LinDistFlow,
+    "ldf": LinDistFlow,
     "n-gnn": NormedGNN,
     # "dc-pf": DC_PF,
     # "dc-pf-slack": DC_PF_Slack,
