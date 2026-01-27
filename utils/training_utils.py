@@ -182,13 +182,13 @@ def train(model,
     #     optimizer, mode='min', factor=0.1, patience=patience//3, min_lr=learning_rate*0.01
     # )
     # OneCycleLR is great for "jumping" over poor local minima early on
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=learning_rate, steps_per_epoch=len(loader_train), epochs=epochs
-    )
+    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    #     optimizer, max_lr=learning_rate, steps_per_epoch=len(loader_train), epochs=epochs
+    # )
     
-    # loss_fn = normalized_mse_loss
+    loss_fn = normalized_mse_loss
     # Standard MSE loss (not normalized)
-    loss_fn = nn.MSELoss()
+    # loss_fn = nn.MSELoss()
     
     # This helps balance supervised vs physics loss contributions
     lambda_phys = 0.00001  # Weight for physics loss if used
@@ -247,7 +247,7 @@ def train(model,
             loss = loss_fn(predictions, ground_truth)
             loss.backward()
             optimizer.step()
-            scheduler.step()
+            # scheduler.step()
             loss_train += loss.item()*num_graphs
         loss_train /= len(loader_train.dataset)
 
@@ -499,7 +499,7 @@ def test(model,
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
                     inference_time += (time.time() - start)
-                    
+
                     pred = pred[2:].view(-1,2) # Skip slack bus
                     true_y = y_test[2:].view(-1,2) # Skip slack bus
                     num_graphs = inputs.shape[0] # Batch size
@@ -510,7 +510,7 @@ def test(model,
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
                     start = time.time()
-                    
+
                     pred = model(batch_test)
 
                     if torch.cuda.is_available():

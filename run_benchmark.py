@@ -19,7 +19,8 @@ from models.lindistflow import (
     LinDistFlow,
 )
 from models.mlp import (
-    NormedMLP,
+    CustomNormedMLP,
+    GlobalMLP
 )
 from models.pg_models import (
     get_pg_model,
@@ -263,7 +264,8 @@ MODEL_CLASSES = {
     # "xgb-parent-corrected": XGB_Parent_Corrected,
     "pfnet": PowerFlowNet,
     "pg-transformer": get_pg_model("Transformer"),
-    "mlp": NormedMLP,
+    "custom-mlp": CustomNormedMLP,
+    "global-mlp": GlobalMLP,
     "arma-gnn": ARMA_GNN,
 }
 COMPLEX_MODELS = []
@@ -278,7 +280,7 @@ SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGB_Parent_Normalized,
                      XGB_LDF_Normalized,
                      XGB_Parent_Corrected]
-TABULAR_MODELS = [NormedMLP]
+TABULAR_MODELS = [CustomNormedMLP, GlobalMLP]
 REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(COMPLEX_MODELS) - set(SEQUENTIAL_MODELS) - set(TABULAR_MODELS)
 
 def run_benchmark(args):

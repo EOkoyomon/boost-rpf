@@ -665,12 +665,12 @@ def get_dataloaders(data_dir,
 
     if testing_grid:
         # Out of distribution test on left over grid
-        train_val_split = [0.75, 0.15]
+        train_val_split = [4/5, 1/5]
         train_val_split = [x / sum(train_val_split) for x in train_val_split] # Redistribute to sum to 1
         train_split, val_split = random_split(train_dataset, train_val_split)
         test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths, tabular=tabular)
     else:
-        train_val_test_split = [0.75, 0.15, 0.10]
+        train_val_test_split = [4/6, 1/6, 1/6]
         train_split, val_split, test_split = random_split(train_dataset, train_val_test_split)
 
     if paths:
