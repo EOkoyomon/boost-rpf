@@ -4,6 +4,9 @@ import os
 import pandas as pd
 import torch
 
+from models.arma_gnn import (
+    ARMA_GNN,
+)
 from models.dcpf_models import (
     DC_PF,
     DC_PF_Slack,
@@ -261,6 +264,7 @@ MODEL_CLASSES = {
     "pfnet": PowerFlowNet,
     "pg-transformer": get_pg_model("Transformer"),
     "mlp": NormedMLP,
+    "arma-gnn": ARMA_GNN,
 }
 COMPLEX_MODELS = []
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
