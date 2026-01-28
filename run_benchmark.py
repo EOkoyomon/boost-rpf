@@ -368,7 +368,8 @@ def run_benchmark(args):
             'corresponding_train_loss',
             'total_epochs',
             'train_time',
-            'inference_time_ms'
+            'inference_time_ms',
+            'seed'
         ]
         # Create a DataFrame for the results
         pd.DataFrame(columns=column_names).to_csv(results_file)
@@ -485,7 +486,8 @@ def run_benchmark(args):
                     corresponding_train_loss,
                     total_epochs,
                     train_time,
-                    inference_time_ms
+                    inference_time_ms,
+                    args.seed
                 )
             )
             print(f'\nCompleted evaluation for model: {model.__name__}', flush=True)

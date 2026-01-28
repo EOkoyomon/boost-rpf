@@ -220,6 +220,7 @@ def train(model,
     if model.is_complex():
         loss_fn = complex_mse_loss # Use MSE loss for complex models. Only one output (complex voltage).
 
+    model = model.to(device)
     for epoch in tqdm(range(epochs)):
         # Train
         model.train()
@@ -440,6 +441,7 @@ def test(model,
             - rmse_va (float): RMSE for voltage angle (va_degree).
             - avg_inference_time_ms (float): Average inference time per sample in milliseconds.
     """
+    model = model.to(device)
     model.eval()
 
     # For plotting

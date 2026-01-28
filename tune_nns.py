@@ -34,8 +34,7 @@ def get_param_grid_mlp():
         "batch_size": [16, 32, 64],
         "learning_rate": [0.0001, 0.00001, 0.000001],
         "epochs": [10000],
-        "num_layers": [6, 7, 8, 9, 10],
-        "hidden_dim": [64, 128, 256],
+        "hidden_dim": [64, 128, 256, 512],
         "dropout": [0.0, 0.1, 0.2],
         "patience": [500],
     }
@@ -44,9 +43,19 @@ def get_param_grid_mlp():
 def get_random_params(param_grid, n_samples=20):
     """Sample random hyperparameter combinations."""
     param_combinations = []
-    for _ in range(n_samples):
+    MAX_DUPLICATES = 10
+    duplicates = 0
+    i = 0
+    while i < n_samples:
         params = {k: random.choice(v) for k, v in param_grid.items()}
-        param_combinations.append(params)
+        if params not in param_combinations:
+            param_combinations.append(params)
+            i += 1
+        else:
+            duplicates += 1
+            if duplicates >= MAX_DUPLICATES:
+                print("Max duplicates reached, stopping early.")
+                break
     return param_combinations
 
 
