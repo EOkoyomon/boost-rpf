@@ -1,4 +1,4 @@
-name: pdf
+name: boost-rpf
 channels:
   - conda-forge
 dependencies:

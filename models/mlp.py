@@ -1,5 +1,5 @@
 # This code is adapted and modified from the Power-Flow-Balancing-with-Decentralized-Graph-Neural-Networks
-# repository in order to work with PyTorch and fit the data/structure requirements of the PathDistFlow project.
+# repository in order to work with PyTorch and fit the data/structure requirements of the BOOST-RPF project.
 #
 # Original code: https://github.com/JonasBergHansen/Power-Flow-Balancing-with-Decentralized-Graph-Neural-Networks (GitHub: JonasBergHansen)
 # Original paper: https://doi.org/10.1109/TPWRS.2022.3195301.

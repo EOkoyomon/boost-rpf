@@ -1,5 +1,5 @@
 # This code is adapted and modified from the PowerGraph-Node repository in order
-# to fit the data/structure requirements of the PathDistFlow project.
+# to fit the data/structure requirements of the BOOST-RPF project.
 #
 # Original code: https://github.com/PowerGraph-Datasets/PowerGraph-Node/tree/main (GitHub: PowerGraph-Datasets)
 # Original paper: https://doi.org/10.52202/079017-3517

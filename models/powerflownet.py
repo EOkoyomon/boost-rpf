@@ -1,5 +1,5 @@
 # This code is adapted and modified from the PowerFlowNet repository in order
-# to fit the data/structure requirements of the PathDistFlow project.
+# to fit the data/structure requirements of the BOOST-RPF project.
 #
 # Original code: https://github.com/StavrosOrf/PoweFlowNet/tree/main (GitHub: StavrosOrf)
 # Original paper: https://doi.org/10.1016/j.ijepes.2024.110112
