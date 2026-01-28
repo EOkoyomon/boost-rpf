@@ -121,6 +121,11 @@ def parse_args():
         "--kerber",
         action="store_true"
     )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=12,
+    )
     args = parser.parse_args()
     return args
 
@@ -330,7 +335,7 @@ def run_benchmark(args):
     assert not (use_cigre_network and use_kerber_network), "Please select only one of --cigre or --kerber."
     
     # Set up training, logging, and experiment cases
-    setup_seeds()
+    setup_seeds(args.seed)
     
     log_dir = None
     if save_results or save_model:
