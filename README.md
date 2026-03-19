@@ -33,6 +33,17 @@ conda activate boost-rpf
     Then move the resulting `Kerber_Dorfnetz/` folder under `data/ENGAGE_dataset/`.
   - This data is used to run Experiment 1 (Known Grids).
 
+Expected directory structure:
+```
+data/
+└── ENGAGE_dataset/
+    ├── Kerber_Dorfnetz/
+    ├── 1-LV-rural1--1-no_sw/
+    ├── 1-LV-rural2--1-no_sw/
+    ├── 1-MV-comm--1-no_sw/
+    └── ... (other grid configurations)
+```
+
 ## Benchmark Script
 
 The main entry point is `run_benchmark.py`. At a high level, it:
