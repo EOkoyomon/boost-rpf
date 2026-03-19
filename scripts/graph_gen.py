@@ -52,9 +52,10 @@ def parse_args():
         default=20,
     )
     parser.add_argument(
-        "--scenario",
-        type=int,
-        default=1,
+        "--grid",
+        default=["kerber"],
+        nargs="+",
+        choices=["cigre", "kerber"],
     )
     args = parser.parse_args()
     return args
@@ -410,7 +411,11 @@ if __name__ == '__main__':
 
     # Convert simbench codes to json files, if not already done.
     filenames = []
-    grid_codes = ['CIGRE_LV', 'Kerber_Dorfnetz']
+    grid_to_code = {
+        'cigre': 'CIGRE_LV',
+        'kerber': 'Kerber_Dorfnetz'
+    }
+    grid_codes = [grid_to_code.get(code, code) for code in args.grid]
     for code in grid_codes:
         f = os.path.join(input_dir, f'{code}.json')
         if not os.path.exists(f):
