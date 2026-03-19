@@ -14,8 +14,15 @@ import pickle
 
 from tqdm import tqdm
 
+# Add project root to sys.path for imports
+import sys
+from pathlib import Path
+proj_root = Path(__file__).parent.parent
+sys.path.append(str(proj_root))
+
 from utils.data_utils import get_grid_paths
 from utils.training_utils import get_lv_grid_codes
+
 
 
 def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.0):

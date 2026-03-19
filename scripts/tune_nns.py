@@ -10,6 +10,13 @@ import random
 from datetime import datetime
 
 import pandas as pd
+
+# Add project root to sys.path for imports
+import sys
+from pathlib import Path
+proj_root = Path(__file__).parent.parent
+sys.path.append(str(proj_root))
+
 from utils.data_utils import get_dataloaders
 from utils.training_utils import get_lv_grid_codes, setup_seeds, get_device, train, test
 from models.arma_gnn import ARMA_GNN

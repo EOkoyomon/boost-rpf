@@ -499,7 +499,7 @@ def load_precomputed_paths(data_dir, grid_type):
     if not os.path.exists(precomputed_path):
         raise FileNotFoundError(
             f"Pre-computed path data not found at {precomputed_path}. "
-            f"Run 'python precompute_paths.py --data_dir {data_dir}' first."
+            f"Run 'python scripts/precompute_paths.py --data_dir {data_dir}' first."
         )
 
     with open(precomputed_path, 'rb') as f:
@@ -625,7 +625,7 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False, tabular=False)
                     print(f'  Loaded pre-computed paths for grid {grid}.')
                 except FileNotFoundError:
                     print(f'  Pre-computed paths not found, computing (slow)...')
-                    print(f'  Hint: Run "python precompute_paths.py --data_dir {data_dir}" to speed up future loads.')
+                    print(f'  Hint: Run "python scripts/precompute_paths.py --data_dir {data_dir}" to speed up future loads.')
                     pyg_dataset = get_grid_paths(data_dir, grid)
                 DATASET_CACHE[(grid, "real", "paths")] = pyg_dataset
             elif tabular:

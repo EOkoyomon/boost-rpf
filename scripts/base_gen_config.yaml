@@ -1,0 +1,69 @@
+default_net_path: "inputs/case60nordic_vanilla.json"
+n_train: 10
+n_val: 10
+n_test: 10
+seed: 12
+keep_reject: True
+
+sampling:
+
+  topology:
+    method: "random_disconnection"
+    params:
+      line:
+        probs:
+          0: 0.2
+          1: 0.2
+          2: 0.2
+          3: 0.2
+          4: 0.2
+
+  total_load:
+    method: "uniform_factor"
+    params:
+      min_val: 0.5 # 0.5
+      max_val: 1.5 # 1.2
+
+  active_load:
+    # method: "normal_independent_factor" # "uniform_independent_values"
+    method: "uniform_independent_values"
+    params:
+      #std: 0.1
+      beta: 0.2 # 1.0
+
+  reactive_load:
+    method: "uniform_power_factor"
+    params:
+      pf_min: 0.7
+      pf_max:  1.
+      flip_prob: 0.1
+  
+  active_gen:
+    method: "uniform_independent_factor"
+    params:
+      beta: 0.25
+
+  # active_gen:
+  #   method: "dc_opf_disconnect"
+  #   params:
+  #     max_loading_percent: 80. # 85.
+  #     min_cp1: 1.
+  #     max_cp1: 2.
+
+  voltage_setpoint:
+    method: "constant"
+
+powerflow:
+  init: "results"
+  enforce_q_lims: True
+  delta_q: 0.0
+
+filtering:
+  max_loading_percent: 99.999
+  # max_count_voltage_violation: 5
+  allow_disconnected_bus: False
+  allow_negative_load: False
+  allow_out_of_range_gen: True
+  max_bus_voltage_pu: 1.15
+  min_bus_voltage_pu: 0.85
+

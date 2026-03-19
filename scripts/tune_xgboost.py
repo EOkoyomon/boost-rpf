@@ -11,11 +11,17 @@ from datetime import datetime
 
 import pandas as pd
 from darts.models import XGBModel
+import xgboost as xgb
 
-from models.models import NativeXGBModelWrapper, XGB_Absolute, XGB_LDF, XGB_Parent, XGBModel_Linear
+# Add project root to sys.path for imports
+import sys
+from pathlib import Path
+proj_root = Path(__file__).parent.parent
+sys.path.append(str(proj_root))
+
+from models.xgb_models import XGB_Absolute, XGB_LDF, XGB_Parent
 from utils.data_utils import get_dataloaders
 from utils.training_utils import get_lv_grid_codes, setup_seeds, test_sequential, train_sequential
-import xgboost as xgb
 
 
 def get_param_grid():
@@ -36,10 +42,10 @@ def get_param_grid():
     }
 
 
-def get_random_params(param_grid, n_samples=20):
+def get_random_params(param_grid, num_samples=20):
     """Sample random hyperparameter combinations."""
     param_combinations = []
-    for _ in range(n_samples):
+    for _ in range(num_samples):
         params = {k: random.choice(v) for k, v in param_grid.items()}
         param_combinations.append(params)
     return param_combinations
@@ -52,12 +58,22 @@ def get_grid_params(param_grid):
     return [dict(zip(keys, v)) for v in itertools.product(*values)]
 
 
-def create_tuned_model_class(params):
+def create_tuned_model_class(model, params):
     """
     Create a TunedXGBModel class that inherits from XGBModel_Linear
     but uses custom hyperparameters.
     """
-    class TunedXGBModel(XGB_Absolute):
+    base_class = None
+    if model == 'xgb-absolute':
+        base_class = XGB_Absolute
+    elif model == 'xgb-parent':
+        base_class = XGB_Parent
+    elif model == 'xgb-ldf':
+        base_class = XGB_LDF
+    else:
+        raise ValueError(f"Unknown model type: {model}")
+
+    class TunedXGBModel(base_class):
         """XGBModel with custom hyperparameters for tuning."""
         def __init__(self):
             # Call parent init to set up prediction scheme and other attributes
@@ -76,10 +92,10 @@ def create_tuned_model_class(params):
     return TunedXGBModel
 
 
-def evaluate_params(params, loader_train, loader_val, loader_test):
+def evaluate_params(model, params, loader_train, loader_val, loader_test):
     """Evaluate a single hyperparameter configuration."""
     # Create model with tuned params
-    model_class = create_tuned_model_class(params)
+    model_class = create_tuned_model_class(model, params)
     model = model_class()
 
     # Train model
@@ -115,8 +131,8 @@ def run_tuning(args):
         param_combinations = get_grid_params(param_grid)
         print(f"Grid search: {len(param_combinations)} combinations")
     else:
-        param_combinations = get_random_params(param_grid, n_samples=args.n_samples)
-        print(f"Random search: {args.n_samples} combinations")
+        param_combinations = get_random_params(param_grid, num_samples=args.num_samples)
+        print(f"Random search: {args.num_samples} combinations")
     
     # Create output directory
     timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
@@ -132,9 +148,9 @@ def run_tuning(args):
         print(f"\n[{i+1}/{len(param_combinations)}] Testing: {params}")
         
         try:
-            metrics = evaluate_params(params, loader_train, loader_val, loader_test)
+            metrics = evaluate_params(args.model, params, loader_train, loader_val, loader_test)
             
-            result = {**params, **metrics}
+            result = {"model": args.model, **params, **metrics}
             results.append(result)
             
             print(f"  RMSE V_m: {metrics['rmse_vm']:.6f}, RMSE V_a: {metrics['rmse_va']:.4f}, "
@@ -159,7 +175,7 @@ def run_tuning(args):
     # Save best params
     best_params_file = os.path.join(output_dir, 'best_params.json')
     with open(best_params_file, 'w') as f:
-        json.dump({'params': best_params, 'score': best_score}, f, indent=2)
+        json.dump({'model': args.model, 'params': best_params, 'score': best_score}, f, indent=2)
     print(f"Best params saved to: {best_params_file}")
     
     TOP_N = 10
@@ -178,9 +194,11 @@ def run_tuning(args):
 def parse_args():
     parser = argparse.ArgumentParser(description='Hyperparameter tuning for XGBoost')
     parser.add_argument('--data_dir', required=True, help='Path to data directory')
+    parser.add_argument('--model', choices=['xgb-absolute', 'xgb-parent', 'xgb-ldf'], default='xgb-absolute',
+                        help='Which XGB model variant to tune (default: xgb-absolute)')
     parser.add_argument('--search_type', choices=['grid', 'random'], default='random',
                         help='Search strategy (default: random)')
-    parser.add_argument('--n_samples', type=int, default=20,
+    parser.add_argument('--num_samples', type=int, default=20,
                         help='Number of random samples (default: 20)')
     return parser.parse_args()
 

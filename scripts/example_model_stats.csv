@@ -1,0 +1,7 @@
+,model,testing_grid,num_params,file_size
+0,GlobalMLP,Kerber_Dorfnetz,346.8K,1360KB
+0,ARMA_GNN,Kerber_Dorfnetz,343.2K,1348KB
+0,XGB_Absolute,Kerber_Dorfnetz,86.0K,1384KB
+1,XGB_Parent,Kerber_Dorfnetz,86.3K,1388KB
+2,XGB_LDF,Kerber_Dorfnetz,90.3K,1448KB
+0,LinDistFlow,Kerber_Dorfnetz,-,-

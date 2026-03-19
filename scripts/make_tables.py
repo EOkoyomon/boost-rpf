@@ -410,7 +410,7 @@ def main():
     parser.add_argument(
         "--model_stats_file",
         required=False,
-        help="Path to the CSV file containing model stats"
+        help="Path to the CSV file containing model stats. See 'example_model_stats.csv' for expected format. If not provided, model stats columns will be skipped."
     )
     parser.add_argument(
         "--output", "-o",

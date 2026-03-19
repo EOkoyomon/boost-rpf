@@ -2,10 +2,16 @@
 #
 # This script was modified from the data generation pipeline used in
 # the ENGAGE project (https://gitlab.lrz.de/energy-management-technologies-public/engage/-/blob/main/graph_gen.py).
+#
+# As such, you will need to similarly install the powerdata-gen library as a submodule.
+# See https://gitlab.lrz.de/energy-management-technologies-public/engage#dependencies for instructions on how to do this.
+# Note: you can also just copy the powerdata-gen folder into this repo and do the necessary file update if you do not want to set it up as a submodule.
 
 ### Load dependencies, including the data generator library
 
 import sys, os
+
+from matplotlib.path import Path
 DATA_GEN_PATH = os.path.abspath('powerdata-gen/')
 sys.path.append(DATA_GEN_PATH)
 import powerdata_gen
@@ -412,7 +418,8 @@ if __name__ == '__main__':
         filenames.append(f)
 
     # Load a base config file and change adjust parameters.
-    cfg = OmegaConf.load('base_gen_config.yaml')
+    gen_config = Path(__file__).parent / 'base_gen_config.yaml'
+    cfg = OmegaConf.load(gen_config)
     cfg.n_train, cfg.n_val, cfg.n_test = dataset_split
     cfg.seed = 12
 
