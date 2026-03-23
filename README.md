@@ -61,29 +61,25 @@ The main entry point is `run_benchmark.py`. At a high level, it:
 python run_benchmark.py -h
 
 # Example benchmark run
-python run_benchmark.py --data_dir data/ENGAGE_dataset --kerber --model xgb-parent
+python run_benchmark.py --data_dir data/ENGAGE_dataset --model xgb-parent --experiment 1
 ```
 
 ### Reproducing paper results
 
-Run the following commands, using the three independent seeds `[12, 67, 43]`.
+Run the following commands (separated by model group) using the three independent seeds `[12, 67, 43]`.
 
 ```bash
-# XGB Models
-python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model xgb-absolute xgb-parent xgb-ldf --kerber --save_model --save_results --seed <SEED> 
+# XGB models
 python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model xgb-absolute xgb-parent xgb-ldf --save_model --save_results --seed <SEED>
 
 # ARMA-GNN
-python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model arma-gnn --epochs 10000 --batch_size 64 --kerber --patience 500 --lr 0.001 --save_model --save_results --seed <SEED>
 python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model arma-gnn --epochs 10000 --batch_size 64 --patience 500 --lr 0.001 --save_model --save_results --seed <SEED>
 
 # GlobalMLP
-python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model global-mlp --epochs 10000 --batch_size 64 --kerber --patience 1000 --lr 0.000001 --save_model --save_results --seed <SEED>
-python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model global-mlp --epochs 10000 --batch_size 64 --patience 1000 --lr 0.000001 --save_model --save_results --seed <SEED>
+python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model global-mlp --epochs 10000 --batch_size 64 --patience 500 --lr 0.000001 --save_model --save_results --seed <SEED>
 
-# LDF
-python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model ldf --kerber --save_results --seed <SEED>
-python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model ldf --save_results --seed <SEED>
+# DistFlow models
+python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model distflow ldf --save_results --seed <SEED>
 ```
 
 ## `scripts/` overview

@@ -4,6 +4,7 @@ import torch.nn as nn
 # import torch.utils.data
 # from torch_scatter import scatter_add
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 import simbench as sb
 from tqdm import tqdm
 
@@ -701,3 +702,80 @@ def test_sequential(model,
         plot_predictions(smallest_error_pred[1:], smallest_error_true[1:], largest_error_pred[1:], largest_error_true[1:]) # Skip slack
 
     return rmse_vm, rmse_va, avg_inference_time_ms
+
+def plot_error_accumulation(model, loader_test):
+    """
+    Plots the accumulation of errors in voltage magnitude and angle predictions as a function of hops from the slack bus.
+
+    Args:
+        model_class: The sequential model class (e.g., XGBModelWrapper)
+        loader_test: List of sample dicts from get_grid_paths for testing
+
+    Returns:
+        Tuple of (errors_vm, errors_va)
+    """
+
+    sample = loader_test[0]
+    hops_to_slack = {p['target_node']: len(p['path'])-1 for p in sample['paths']} # -1 because path includes the target node itself
+    max_dist = max(hops_to_slack.values())
+    errors_vm = {i: [] for i in range(1, max_dist+1)}
+    errors_va = {i: [] for i in range(1, max_dist+1)}
+
+    for sample in tqdm(loader_test):
+        predictions = model.predict(sample)
+
+        for node, hops in hops_to_slack.items():
+            loss_rmse = rmse_sequential_wrapped_va(predictions[node:node+1],
+                                               sample['true_voltages'][node:node+1])
+            errors_vm[hops].append(loss_rmse[0])
+            errors_va[hops].append(loss_rmse[1])
+
+    def plot_errors(errors_vm, errors_va):
+        plt.figure(figsize=(5, 5)) # Taller for better spacing when stacked vertically
+
+        def apply_styling(ax, data, title, ylabel, is_vm=False):
+            # Calculate data range for a clean buffer
+            ymin, ymax = min(data), max(data)
+            margin = (ymax - ymin) * 0.15 if ymax != ymin else 0.001
+
+            ax.plot(sorted(errors_vm.keys()), data, '-o', markersize=4, linewidth=1.2, color='#1f77b4', clip_on=False)
+            ax.set_ylabel(ylabel, fontsize=12)
+            ax.set_xticks(sorted(errors_vm.keys()))
+
+            # Grid: Horizontal lines only
+            ax.grid(axis='y', linestyle='--', alpha=0.7)
+
+            # Apply Y-axis buffer
+            ax.set_ylim(ymin - margin, ymax + margin)
+
+            formatter = ticker.ScalarFormatter(useMathText=True)
+            formatter.set_scientific(True)
+            if is_vm:
+                # Force scientific notation for Voltage Magnitude
+                formatter.set_powerlimits((-3, -3)) # forces 10^-3
+            else:
+                formatter.set_powerlimits((-2, -2)) # forces 10^-3
+            ax.yaxis.set_major_formatter(formatter)
+
+            # Shrink tick label size slightly
+            ax.tick_params(axis='both', which='major', labelsize=9)
+
+        # Subplot 1: Voltage Magnitude
+        ax1 = plt.subplot(2, 1, 1)
+        means_vm = [np.mean(errors_vm[i]) for i in sorted(errors_vm.keys())]
+        apply_styling(ax1, means_vm, 'Voltage Magnitude RMSE', 'RMSE (pu)', is_vm=True)
+        ax1.set_title('Prediction Stability', fontsize=14, pad=10)
+
+        # Subplot 2: Voltage Angle
+        ax2 = plt.subplot(2, 1, 2)
+        means_va = [np.mean(errors_va[i]) for i in sorted(errors_va.keys())]
+        apply_styling(ax2, means_va, 'Voltage Angle RMSE', 'RMSE (degree)')
+        ax2.set_xlabel('Distance from Slack', fontsize=12)
+
+        plt.tight_layout()
+        # plt.savefig('error_accumulation.pdf', format="pdf", dpi=300)
+        plt.show()
+
+    plot_errors(errors_vm, errors_va)
+
+    return errors_vm, errors_va

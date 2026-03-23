@@ -536,74 +536,12 @@ def load_precomputed_paths(data_dir, grid_type):
 
     return all_samples
 
-
-def create_complex_features(dataset):
-    """
-    Convert real-valued features in the dataset to complex-valued features.
-    Args:
-        dataset (list of torch_geometric.data.Data): List of PyTorch Geometric Data objects with real-valued features.
-
-    Returns:
-        list of torch_geometric.data.Data: List of PyTorch Geometric Data objects with complex-valued features.
-    """
-    complex_dataset = []
-
-    for data in dataset:
-        # Original data format:
-        #   x features: [p_mw, q_mvar, hops_to_slack]
-        #   edge_attr features: [r_pu, x_pu]
-        #   y labels: [vm_pu, va_degree]
-        #   slack_info (global): [slack_vm_pu, slack_va_degree, slack_r_pu, slack_x_pu]
-
-        # New data format:
-        #   x features: # [complex_power, hops_to_slack]
-        #   edge_attr features: [complex_impedance]
-        #   y labels: [complex_voltage]
-        #   slack_info (global): [slack_complex_voltage, slack_complex_impedance]
-
-        # Make x into complex: p_mw + 1j * q_mvar
-        complex_power = data.x[:, 0] + 1j * data.x[:, 1]
-        hops_to_slack = data.x[:, 2]
-        complex_x = torch.cat([complex_power.view(-1, 1), hops_to_slack.unsqueeze(1).type(torch.complex64)], dim=1)
-
-        # Make edge_attr into complex: r_pu + 1j * x_pu
-        complex_impedance = data.edge_attr[:, 0] + 1j * data.edge_attr[:, 1]
-        complex_edge_attr = complex_impedance.view(-1, 1).type(torch.complex64)
-
-        # Make y into complex: [vm_pu * exp(1j * va_radian)]
-        phase_angle_rad = data.y[:, 1] * torch.pi / 180.0  # Convert to radians
-        complex_voltage = torch.polar(data.y[:, 0], phase_angle_rad)  # Convert to complex form
-        complex_y = complex_voltage.view(-1, 1).type(torch.complex64)
-
-        # Make slack_info into complex: [slack_vm_pu * exp(1j * slack_va_radian), slack_r_pu + 1j * slack_x_pu]
-        slack_complex_impedance = data.slack_info[2] + 1j * data.slack_info[3]
-        slack_complex_impedance = slack_complex_impedance.type(torch.complex64)
-        slack_phase_angle_rad = data.slack_info[1] * torch.pi / 180.0
-        slack_complex_voltage = torch.polar(data.slack_info[0], slack_phase_angle_rad)
-        slack_complex_voltage = slack_complex_voltage.type(torch.complex64)
-
-        slack_info = torch.tensor([slack_complex_voltage, slack_complex_impedance], dtype=torch.complex64)
-
-        complex_data = Data(
-            x=complex_x,
-            edge_index=data.edge_index, # Stays the same
-            edge_attr=complex_edge_attr,
-            y=complex_y,
-            slack_info=slack_info,
-            ppci=data.ppci,
-            grid_name=data.grid_name
-        )
-        complex_dataset.append(complex_data)
-
-    return complex_dataset
-
-def get_dataset(data_dir, grid_types, complex=False, paths=False, tabular=False):
+def get_dataset(data_dir, grid_types, paths=False, tabular=False):
     """
     Load and cache datasets for the specified grid types.
     Args:
         data_dir (str): Base directory where datasets are stored.
         grid_types (list of str): List of grid types to load.
-        complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
         tabular (bool): Whether to load tabular datasets.
 
@@ -613,7 +551,7 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False, tabular=False)
     complete_dataset = []
     for grid in grid_types:
         pyg_dataset = None
-        id = (grid, "complex" if complex else "real", "paths" if paths else "tabular" if tabular else "graphs")
+        id = (grid, "real", "paths" if paths else "tabular" if tabular else "graphs")
         if id in DATASET_CACHE:
             pyg_dataset = DATASET_CACHE[id]
         else:
@@ -634,9 +572,6 @@ def get_dataset(data_dir, grid_types, complex=False, paths=False, tabular=False)
             else:
                 pyg_dataset = get_pyg_graphs(data_dir, grid) # Fetch real dataset
                 DATASET_CACHE[(grid, "real", "graphs")] = pyg_dataset # Cache real dataset
-            if complex:
-                pyg_dataset = create_complex_features(pyg_dataset) # Convert to complex dataset
-                DATASET_CACHE[id] = pyg_dataset # Cache complex dataset
         complete_dataset.extend(pyg_dataset)
 
     return complete_dataset
@@ -645,7 +580,6 @@ def get_dataloaders(data_dir,
                     training_grids,
                     testing_grid=None,
                     batch_size=16,
-                    complex=False,
                     paths=False,
                     tabular=False):
     """
@@ -655,20 +589,19 @@ def get_dataloaders(data_dir,
         training_grids (list of str): List of grid types to use for training.
         testing_grid (str or None): Grid type to use for testing. If None, a portion of training data is used for testing.
         batch_size (int): Batch size for the DataLoaders.
-        complex (bool): Whether to load complex datasets.
         paths (bool): Whether to load path-based datasets.
         tabular (bool): Whether to load tabular datasets.
     Returns:
         tuple: (loader_train, loader_val, loader_test) DataLoaders or Numpy Arrays.
     """
-    train_dataset = get_dataset(data_dir, training_grids, complex=complex, paths=paths, tabular=tabular)
+    train_dataset = get_dataset(data_dir, training_grids, paths=paths, tabular=tabular)
 
     if testing_grid:
         # Out of distribution test on left over grid
         train_val_split = [4/5, 1/5]
         train_val_split = [x / sum(train_val_split) for x in train_val_split] # Redistribute to sum to 1
         train_split, val_split = random_split(train_dataset, train_val_split)
-        test_split = get_dataset(data_dir, [testing_grid], complex=complex, paths=paths, tabular=tabular)
+        test_split = get_dataset(data_dir, [testing_grid], paths=paths, tabular=tabular)
     else:
         train_val_test_split = [4/6, 1/6, 1/6]
         train_split, val_split, test_split = random_split(train_dataset, train_val_test_split)

@@ -14,25 +14,20 @@ import argparse
 from pathlib import Path
 
 
-def load_and_analyze_data(csv_file_path):
+def load_and_analyze_data(results_df):
     """
     Load CSV data and calculate statistics for each model type.
     
     Args:
-        csv_file_path (str): Path to the CSV file
+        results_df (pd.DataFrame): DataFrame containing the results
         
     Returns:
         dict: Dictionary with model statistics
     """
-    # Load the CSV data
-    df = pd.read_csv(csv_file_path)
-    
-    # Filter out entries where testing_grid == "all"
-    # df_filtered = df[df['testing_grid'] != 'all']
-    df_filtered = df.copy()
+    df_filtered = results_df.copy()
     
     # Define the metrics columns we want to analyze
-    metrics = ['rmse_vm_pu', 'rmse_va_degree'] # 'mape_vm_pu', 'mape_va_degree']
+    metrics = ['rmse_vm_pu', 'rmse_va_degree']
     
     # Get unique model types
     model_types = df_filtered['model'].unique()
@@ -103,11 +98,9 @@ def find_best_values(results, metrics):
 
 def format_number(value, precision=4):
     """Format number with appropriate precision."""
-    return f"{value:.{precision}f}"
-    if abs(value) < 1e-3:
+    if precision is None:
         return f"{value:.2e}"
-    else:
-        return f"{value:.{precision}f}"
+    return f"{value:.{precision}f}"
 
 
 def format_model_name(model_name):
@@ -119,31 +112,32 @@ def format_model_name(model_name):
     return name_mappings.get(model_name, model_name.replace('_', '-'))
 
 
-def generate_latex_table(results, metrics, model_types, best_values, second_best_values, mean_only=False):
+def generate_latex_table(results_df, mean_only=False):
     """
     Generate LaTeX table code with the results.
-    Models are on rows, metrics are on columns, split into RMSE and MAPE sections.
+    Models are on rows, metrics are on columns, split into RMSE VM and VA sections.
     
     Args:
-        results (dict): Dictionary with model statistics
-        metrics (list): List of metric names
-        model_types (list): List of model type names
-        best_values (dict): Dictionary indicating best values
-        second_best_values (dict): Dictionary indicating second best values
+        results_df (pd.DataFrame): DataFrame with the results
+        mean_only (bool): If True, only include mean values in the table. Otherwise, include min, max, mean, std.
         
     Returns:
         str: LaTeX table code
     """
+    results, metrics, model_types = load_and_analyze_data(results_df)
+
+    print(f"Found {len(model_types)} model types: {', '.join(model_types)}")
+    print(f"Analyzing {len(metrics)} metrics: {', '.join(metrics)}")
+
+    # Find best values
+    best_values, second_best_values = find_best_values(results, metrics)
+
     # Define metric display names and group them
     metric_groups = {
         'RMSE': {
             'rmse_vm_pu': 'VM (p.u.)',
             'rmse_va_degree': 'VA (deg)'
         },
-        # 'MAPE': {
-        #     'mape_vm_pu': 'VM (\\%)',
-        #     'mape_va_degree': 'VA (\\%)'
-        # }
     }
     
     # Define statistic display names
@@ -225,8 +219,24 @@ def generate_latex_table(results, metrics, model_types, best_values, second_best
     latex_code.append("\\bottomrule")
     latex_code.append("\\end{tabular}")
     latex_code.append("\\end{table}")
+
+    latex_table = "\n".join(latex_code)
+
+    # Print summary statistics only for statistical summary table
+    if metrics is not None and best_values is not None and results is not None:
+        print("\nSummary:")
+        print("-" * 40)
+        for metric in metrics:
+            print(f"\n{metric.upper()}:")
+            stats = ['min', 'max', 'mean', 'std']
+            if mean_only:
+                stats = ['mean']
+            for stat in stats:
+                best_model = best_values[metric][stat]
+                best_value = results[best_model][metric][stat]
+                print(f"  Best {stat}: {best_model} ({format_number(best_value)})")
     
-    return "\n".join(latex_code)
+    return latex_table
 
 def format_model_capacity(num):
     """
@@ -242,44 +252,32 @@ def format_model_capacity(num):
 
     return f"{num:.1f}P" # Handles Quadrillions (Peta) just in case
 
-def generate_latex_table_raw(results_csv_file_path, model_stats_csv_file_path=None):
+def generate_latex_table_raw(results_df, experiment=None):
     """
-    Generate LaTeX table directly from CSV data, grouped by testing_grid.
+    Generate LaTeX table from the results dataframe, grouped by testing_grid.
     Bolds the smallest value for each metric within each testing_grid group.
     
     Args:
-        results_csv_file_path (str): Path to the CSV file with results
-        model_stats_csv_file_path (str): Path to the CSV file with model stats
+        results_df (pd.DataFrame): DataFrame with the results
+        experiment (int, optional): If provided, filters data for the specified experiment group (1, 2, or 3)
         
     Returns:
         str: LaTeX table code
     """
     # Load the CSV data
-    df = pd.read_csv(results_csv_file_path)
+    df = results_df.copy()
 
     # Handling potential unnamed index columns that might have been saved in the CSVs
     # (This step is often necessary when CSVs are saved with index=True)
     if 'Unnamed: 0' in df.columns:
         df = df.drop(columns=['Unnamed: 0'])
-    
-    # Define the columns we want to include in order
-    columns = ['testing_grid', 'model', 'rmse_vm_pu', 'rmse_va_degree', 'train_time', 'inference_time_ms']
-    # columns = ['testing_grid', 'model', 'rmse_vm_pu', 'rmse_va_degree', 'mape_vm_pu', 'mape_va_degree', 'train_time']
-    metrics_for_bolding = columns[2:]  # Metrics start from index 2
-    # metrics_for_bolding = ['rmse_vm_pu', 'rmse_va_degree', 'mape_vm_pu', 'mape_va_degree', 'train_time']
 
-    if model_stats_csv_file_path:
-        stats_df = pd.read_csv(model_stats_csv_file_path)
-        if 'Unnamed: 0' in stats_df.columns:
-            stats_df = stats_df.drop(columns=['Unnamed: 0'])
-        df = pd.merge(df, stats_df, on=['testing_grid', 'model'], how='inner')
-        model_stats_columns = ['inference_time_ms']#, 'num_params']
-        columns.extend(model_stats_columns)
-        metrics_for_bolding.extend(model_stats_columns)
+    # Define the columns we want to include in order
+    columns = ['testing_grid', 'model', 'rmse_vm_pu', 'rmse_va_degree' , 'train_time', 'inference_time_ms']
+    metrics_for_bolding = columns[2:]  # Metrics start from index 2
     
     # Select and sort the data
     df_selected = df[columns].copy()
-    df_selected = df_selected.sort_values(['testing_grid', 'model'])
     
     # Find best (minimum) values for each metric within each testing_grid group
     best_values = {}
@@ -324,19 +322,17 @@ def generate_latex_table_raw(results_csv_file_path, model_stats_csv_file_path=No
         "\\textbf{Model}",
         "\\textbf{RMSE VM}",
         "\\textbf{RMSE VA}",
-        # "\\textbf{MAPE VM}",
-        # "\\textbf{MAPE VA}",
         "\\textbf{Train (s)}",
         "\\textbf{Inference (ms)}",
     ]
-    if model_stats_csv_file_path:
-        headers.extend([
-            "\\textbf{Inference (ms)}",
-            "\\textbf{Capacity}",
-        ])
     header_row = " & ".join(headers) + " \\\\"
     latex_code.append(header_row)
     latex_code.append("\\midrule")
+
+    # If we are returning raw results over all experiments (experiment is None) use precision 5. Otherwise, dont specify precision.
+    precision = None
+    if experiment is None:
+        precision = 5
 
     for i, grid in enumerate(df_selected['testing_grid'].unique()):
         grid_df = df_selected[df_selected['testing_grid'] == grid]
@@ -362,27 +358,21 @@ def generate_latex_table_raw(results_csv_file_path, model_stats_csv_file_path=No
             for metric in metrics_for_bolding:
                 mean_value = grid_model_df[metric].mean() # Mean of the seeds
                 std_value = grid_model_df[metric].std() # Std of the seeds
-                # value = row[metric]
                 if metric == 'train_time':
                     formatted_mean_value = f"{mean_value:.1f}"
                     formatted_std_value = f"{std_value:.1f}"
-                    # formatted_value = f"{value:.1f}"
                 elif metric == 'num_params':
                     # Should only be one.
                     formatted_mean_value = format_model_capacity(mean_value)
                     formatted_std_value = format_model_capacity(std_value)
-                    # formatted_value = format_model_capacity(value)
                 else:
-                    formatted_mean_value = format_number(mean_value, precision=5)
-                    formatted_std_value = format_number(std_value, precision=5)
-                    # formatted_value = format_number(value, precision=5)
+                    formatted_mean_value = format_number(mean_value, precision=precision)
+                    formatted_std_value = format_number(std_value, precision=precision)
 
                 formatted_value = f"{formatted_mean_value} {{\\scriptsize $\\pm$ {formatted_std_value}}}"
 
                 # Bold if this model has the best value for this metric in this grid
                 if metric != 'num_params' and model_name in best_values[grid][metric]['models']:
-                    formatted_value = f"\\textbf{{{formatted_value}}}"
-                    formatted_value = f"\\textbf{{{formatted_value}}}"
                     formatted_value = f"\\textbf{{{formatted_value}}}"
                 
                 formatted_values.append(formatted_value)
@@ -404,13 +394,15 @@ def main():
         description="Analyze model performance and generate LaTeX table"
     )
     parser.add_argument(
-        "csv_file", 
+        "--results",
+        required=True,
+        default="all_results_with_seed.csv",
         help="Path to the CSV file containing model results"
     )
     parser.add_argument(
-        "--model_stats_file",
-        required=False,
-        help="Path to the CSV file containing model stats. See 'example_model_stats.csv' for expected format. If not provided, model stats columns will be skipped."
+        "--experiment", 
+        type=int,
+        help="The experiment group to analyze (1, 2, or 3). If not provided, analyzes all experiments together."
     )
     parser.add_argument(
         "--output", "-o",
@@ -419,47 +411,38 @@ def main():
     parser.add_argument(
         "--raw", "-r",
         action="store_true",
-        help="Generate raw data table instead of statistical summary"
+        help="Generate raw data table (each testing grid separate) instead of statistical summary"
     )
     parser.add_argument(
         "--mean", "-m",
         action="store_true",
-        help="Generate table with mean values only instead of full statistical summary"
+        help="Generate summary table over all grids, but only using the mean."
     )
     
     args = parser.parse_args()
     
     # Check if CSV file exists
-    csv_path = Path(args.csv_file)
+    csv_path = Path(args.results)
     if not csv_path.exists():
         print(f"Error: CSV file '{csv_path}' not found!")
         return 1
     
     try:
         print(f"Loading data from {csv_path}...")
-        
+
+        # Load the CSV data
+        df = pd.read_csv(csv_path)
+        if args.experiment is not None:
+            df = df[df['experiment'] == args.experiment]
+
+        df = df[df['model'] != 'LinDistFlow']
+
         if args.raw:
-            model_stats_path = None
-            if args.model_stats_file:
-                model_stats_path = Path(args.model_stats_file)
-                if not model_stats_path.exists():
-                    model_stats_path = None
             # Generate raw data table
-            latex_table = generate_latex_table_raw(csv_path, model_stats_path)
-            # Initialize variables for consistency (not used in raw mode)
-            results, metrics, best_values = None, None, None
-        else:
-            # Load and analyze data for statistical summary
-            results, metrics, model_types = load_and_analyze_data(csv_path)
-            
-            print(f"Found {len(model_types)} model types: {', '.join(model_types)}")
-            print(f"Analyzing {len(metrics)} metrics: {', '.join(metrics)}")
-            
-            # Find best values
-            best_values, second_best_values = find_best_values(results, metrics)
-            
+            latex_table = generate_latex_table_raw(df, experiment=args.experiment)
+        else:            
             # Generate statistical summary table
-            latex_table = generate_latex_table(results, metrics, model_types, best_values, second_best_values=second_best_values, mean_only=args.mean)
+            latex_table = generate_latex_table(df, mean_only=args.mean)
         
         # Output results
         if args.output:
@@ -471,20 +454,6 @@ def main():
             print("\nGenerated LaTeX Table:")
             print("=" * 50)
             print(latex_table)
-        
-        # Print summary statistics only for statistical summary table
-        if not args.raw and metrics is not None and best_values is not None and results is not None:
-            print("\nSummary:")
-            print("-" * 40)
-            for metric in metrics:
-                print(f"\n{metric.upper()}:")
-                stats = ['min', 'max', 'mean', 'std']
-                if args.mean:
-                    stats = ['mean']
-                for stat in stats:
-                    best_model = best_values[metric][stat]
-                    best_value = results[best_model][metric][stat]
-                    print(f"  Best {stat}: {best_model} ({format_number(best_value)})")
         
         return 0
         

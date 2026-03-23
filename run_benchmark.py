@@ -50,6 +50,7 @@ from utils.training_utils import (
     get_model_save_path,
     plot_loss,
     setup_seeds,
+    plot_error_accumulation,
     test,
     test_sequential,
     train,
@@ -114,17 +115,19 @@ def parse_args():
         required=False,
     )
     parser.add_argument(
-        "--cigre",
-        action="store_true"
-    )
-    parser.add_argument(
-        "--kerber",
-        action="store_true"
-    )
-    parser.add_argument(
         "--seed",
         type=int,
         default=12,
+    )
+    parser.add_argument(
+        "--experiment",
+        type=int,
+        help="The experiment group to analyze (1, 2, or 3). If not provided, analyzes all experiments together."
+    )
+    parser.add_argument(
+        "--show_error_accumulation",
+        action="store_true",
+        help="For sequential models, show how error accumulates with hops from slack. Only applies to sequential models and requires a trained model to be loaded using --load_model_dir and --load_model_name."
     )
     args = parser.parse_args()
     return args
@@ -221,7 +224,8 @@ def evaluate_performance_sequential(model_class,
                                     eval_only=False,
                                     load_model_dir=None,
                                     model_load_experiment_id='0',
-                                    experiment_id='0'):
+                                    experiment_id='0',
+                                    show_error_accumulation=False):
     """
     Evaluate sequential models that operate on path sequences.
 
@@ -274,11 +278,15 @@ def evaluate_performance_sequential(model_class,
 
     corresponding_train_loss = total_epochs = -1
 
+    if show_error_accumulation:
+        _ = plot_error_accumulation(model=model, loader_test=loader_test)
+
     return rmse_vm, rmse_va, validation_error, corresponding_train_loss, total_epochs, train_time, inference_time_ms
 
 # Get models to evaluate
 MODEL_CLASSES = {
     "ldf": LinDistFlow,
+    "distflow": DistFlow,
     "n-gnn": NormedGNN,
     "xgb-absolute": XGB_Absolute,
     "xgb-parent": XGB_Parent,
@@ -289,7 +297,6 @@ MODEL_CLASSES = {
     "global-mlp": GlobalMLP,
     "arma-gnn": ARMA_GNN,
 }
-COMPLEX_MODELS = []
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
 SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGBModel_Linear,
@@ -302,7 +309,7 @@ SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGB_LDF_Normalized,
                      XGB_Parent_Corrected]
 TABULAR_MODELS = [CustomNormedMLP, GlobalMLP]
-REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(COMPLEX_MODELS) - set(SEQUENTIAL_MODELS) - set(TABULAR_MODELS)
+REAL_VALUED_GRAPH_MODELS = set(MODEL_CLASSES.values()) - set(SEQUENTIAL_MODELS) - set(TABULAR_MODELS)
 
 def run_benchmark(args):
     # Argument parsing and validation
@@ -320,9 +327,6 @@ def run_benchmark(args):
     eval_only = args.eval_only
     load_model_dir = args.load_model_dir
     load_model_name = args.load_model_name
-    use_cigre_network = args.cigre
-    use_kerber_network = args.kerber
-    assert not (use_cigre_network and use_kerber_network), "Please select only one of --cigre or --kerber."
     
     # Set up training, logging, and experiment cases
     setup_seeds(args.seed)
@@ -332,24 +336,25 @@ def run_benchmark(args):
         # Create a new log directory for each model
         log_dir = create_log_dir()
     
-    if use_cigre_network:
-        grids_to_compare = ['CIGRE_LV']
-        test_cases = [(grids_to_compare, None)]  # All grids scenario
-    elif use_kerber_network:
-        grids_to_compare = ['Kerber_Dorfnetz']
-        test_cases = [(grids_to_compare, None)]  # All grids scenario
-    else:
-        # Only compare LV networks because radial
-        grids_to_compare = get_lv_grid_codes(scenario=1)
-        test_cases = [(grids_to_compare, None)]  # All grids scenario
-        for grid in grids_to_compare:
-            test_cases.append(([g for g in grids_to_compare if g != grid], grid))  # Leave-one-out scenarios
-        # test_cases = test_cases[:1] #+ test_cases[-4:-3] + test_cases[-1:]
+    # Select experiment cases based on argument
+    selected_experiments = [args.experiment] if args.experiment else [1, 2, 3]
+
+    # Only compare LV networks because radial
+    test_cases = []
+    test_cases.append((1, ['Kerber_Dorfnetz'], None)) # Experiment 1: Kerber Dorfnetz
+    grids_to_compare = get_lv_grid_codes(scenario=1)
+    test_cases.append((2, grids_to_compare, None))  # Experiment 2: Heterogenous Grids (all grids)
+    for grid in grids_to_compare:
+        test_cases.append((3, [g for g in grids_to_compare if g != grid], grid))  # Experiment 3: OOD (Leave-one-out scenarios)
+
+    # Filter test cases based on selected experiments
+    test_cases = [case for case in test_cases if case[0] in selected_experiments]
 
     # Set up results tracking
     if save_results and log_dir:
         results_file = os.path.join(log_dir, 'results_summary.csv')
         column_names = [
+            'experiment',
             'model',
             'testing_grid',
             'rmse_vm_pu',
@@ -372,11 +377,10 @@ def run_benchmark(args):
         models_to_evaluate = [MODEL_CLASSES[m] for m in args.model]
 
     # Run evaluations
-    for training_grids, testing_grid in test_cases:
+    for experiment, training_grids, testing_grid in test_cases:
         # Get data loaders
 
         need_real_valued_data = len(set(models_to_evaluate) & set(REAL_VALUED_GRAPH_MODELS)) > 0
-        need_complex_valued_data = len(set(models_to_evaluate) & set(COMPLEX_MODELS)) > 0
         need_real_valued_path_data = len(set(models_to_evaluate) & set(SEQUENTIAL_MODELS)) > 0
         need_real_valued_tabular_data = len(set(models_to_evaluate) & set(TABULAR_MODELS)) > 0
 
@@ -384,12 +388,6 @@ def run_benchmark(args):
         if need_real_valued_data:
             loader_train_real, loader_val_real, loader_test_real = get_dataloaders(
                 data_dir, training_grids, testing_grid, batch_size=batch_size
-            )
-
-        # If no complex models are being evaluated, skip loading complex data
-        if need_complex_valued_data:
-            loader_train_complex, loader_val_complex, loader_test_complex = get_dataloaders(
-                data_dir, training_grids, testing_grid, batch_size=batch_size, complex=True
             )
 
         # If no path-based models are being evaluated, skip loading path-based data
@@ -408,10 +406,7 @@ def run_benchmark(args):
         results = []
 
         for model in models_to_evaluate:
-            # Use complex data loaders for complex models
-            if model in COMPLEX_MODELS:
-                loader_train, loader_val, loader_test = loader_train_complex, loader_val_complex, loader_test_complex
-            elif model in SEQUENTIAL_MODELS:
+            if model in SEQUENTIAL_MODELS:
                 loader_train, loader_val, loader_test = loader_train_path, loader_val_path, loader_test_path
             elif model in TABULAR_MODELS:
                 loader_train, loader_val, loader_test = loader_train_tabular, loader_val_tabular, loader_test_tabular
@@ -419,12 +414,10 @@ def run_benchmark(args):
                 loader_train, loader_val, loader_test = loader_train_real, loader_val_real, loader_test_real
             print('\n--------------------------------------------------', flush=True)
             case_name = ''
-            if testing_grid:
-                case_name = testing_grid
-            elif use_cigre_network:
-                case_name = 'CIGRE_LV'
-            elif use_kerber_network:
+            if training_grids[0] == 'Kerber_Dorfnetz':
                 case_name = 'Kerber_Dorfnetz'
+            elif testing_grid:
+                case_name = testing_grid
             else:
                 case_name = 'all'
             print(f'\nEvaluating model: {model.__name__} | Testing grid: {case_name}', flush=True)
@@ -448,7 +441,8 @@ def run_benchmark(args):
                                         eval_only=eval_only,
                                         load_model_dir=load_model_dir,
                                         model_load_experiment_id=f"{load_model_name if load_model_name else model.__name__}_{case_name}",
-                                        experiment_id=f"{model.__name__}_{case_name}")
+                                        experiment_id=f"{model.__name__}_{case_name}",
+                                        show_error_accumulation=args.show_error_accumulation)
             else:
                 rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms = \
                     evaluate_performance(model_class=model,
@@ -468,6 +462,7 @@ def run_benchmark(args):
             
             results.append(
                 (
+                    experiment,
                     model.__name__,
                     case_name,
                     rmse_vm,

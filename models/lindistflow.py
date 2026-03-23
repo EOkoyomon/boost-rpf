@@ -45,7 +45,7 @@ class DistFlow(nn.Module):
         return True
 
     def forward(self, data):
-        vm_predictions, va_predictions = calculate_distflow_iterative(data, slack_index=0, slack_vm_pu=data.slack_info[0])
+        vm_predictions, va_predictions = calculate_distflow_iterative(data, slack_index=0, slack_vm_pu=data.slack_info[0], linear=False)
         out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
         return out
 

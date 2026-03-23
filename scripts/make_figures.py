@@ -23,7 +23,8 @@ def plot_inference_time_scaling(df_all, grid_to_num_noodes, save=False):
                     inference_time = df_model[df_model['testing_grid'] == grid]['inference_time_ms'].values.mean()
                     x.append(num_nodes)
                     y.append(inference_time)
-        plt.plot(x, y, label=model, marker='o', linestyle='-')
+        model_label = model.replace('_', '-')
+        plt.plot(x, y, label=model_label, marker='o', linestyle='-')
     plt.xlabel('Number of Nodes', fontsize=22)
     plt.ylabel('Inference Time (ms)', fontsize=22)
     # Add a little padding to the title
@@ -42,7 +43,7 @@ def plot_inference_time_scaling(df_all, grid_to_num_noodes, save=False):
 def plot_vm_boxplot(df_all, metric, save=False):
 
     # 1. Filter and prepare data
-    df_ood = df_all[(df_all['testing_grid'] != 'all') & (df_all['testing_grid'] != 'Kerber_Dorfnetz')].copy()
+    df_ood = df_all[df_all['experiment'] == 3].copy() # Only OOD (Leave-one-out) scenarios
     df_ood['model_label'] = df_ood['model'].str.replace('_', '-')
 
     # 2. Balanced Figure Size - 8 wide, 6 tall is a standard "sweet spot" for papers
@@ -99,20 +100,14 @@ def plot_vm_boxplot(df_all, metric, save=False):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate figures for the paper.")
-    parser.add_argument("--exp1_results", type=str, default="experiment_1_results_with_seed.csv", help="Path to experiment 1 results CSV.")
-    parser.add_argument("--exp2_results", type=str, default="experiment_2_results_with_seed.csv", help="Path to experiment 2 results CSV.")
-    parser.add_argument("--exp3_results", type=str, default="experiment_3_results_with_seed.csv", help="Path to experiment 3 results CSV.")
+    parser.add_argument("--results", type=str, default="all_results_with_seed.csv", help="Path to combined results CSV from all experiments.")
+    parser.add_argument("--output_dir", type=str, default="figures", help="Output directory for saving figures.")
     parser.add_argument("--save", action="store_true", help="Save figures as high resolution PDFs.")
     args = parser.parse_args()
 
-    FIGURES_DIR = Path("figures")
+    FIGURES_DIR = Path(args.output_dir)
 
-    df_exp1 = pd.read_csv(args.exp1_results)
-    df_exp2 = pd.read_csv(args.exp2_results)
-    df_exp3 = pd.read_csv(args.exp3_results)
-
-    # Combine dataframes
-    df_all = pd.concat([df_exp1, df_exp2, df_exp3], ignore_index=True)
+    df_all = pd.read_csv(args.results)
 
     # Get mean and std of 'train_time' grouped by model
     grouped = df_all.groupby('model')['train_time'].agg(['mean', 'std']).reset_index()
@@ -135,10 +130,14 @@ if __name__ == "__main__":
 
     for testing_grid in grid_to_num_noodes.keys():
         ldf_inference_time = df_all.loc[(df_all['model'] == 'LinDistFlow') & (df_all['testing_grid'] == testing_grid), 'inference_time_ms'].values[0]
-        # Add ldf inference time to XGB_Absolute, XGB_Parent, XGB_LDF models for the same testing grid
+        # Add ldf inference time to XGB_Absolute, XGB_Parent, XGB_LDF models for the same testing grid, because LDF is done before the XGB inference and is part of the total inference time for those models.
         for model in ['XGB_Absolute', 'XGB_Parent', 'XGB_LDF']:
             df_all.loc[(df_all['model'] == model) & (df_all['testing_grid'] == testing_grid), 'inference_time_ms'] += ldf_inference_time
 
+    # Skip LinDistFlow in plots
+    df_all = df_all[df_all['model'] != 'LinDistFlow']
+
+    # Make plots
     plot_inference_time_scaling(df_all, grid_to_num_noodes, save=args.save)
     plot_vm_boxplot(df_all, metric='rmse_vm_pu', save=args.save)
     plot_vm_boxplot(df_all, metric='rmse_va_degree', save=args.save)
