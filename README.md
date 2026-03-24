@@ -1,8 +1,9 @@
 # BOOST-RPF
 
-Repository accompanying the paper **"BOOST-RPF: Boosted Sequential Trees for Radial Power Flow"** (Paper identifier: **[TODO: arXiv/DOI]**).
+Repository accompanying experiment code for the paper **"BOOST-RPF: Boosted Sequential Trees for Radial Power Flow"**.  
+&emsp; Identifier: [**https://doi.org/10.48550/arXiv.2603.21977**](https://doi.org/10.48550/arXiv.2603.21977).
 
-BOOST-RPF reformulates radial power-flow voltage prediction from global graph regression to sequential root-to-leaf path learning. The framework evaluates three variants (Absolute Voltage, Parent Residual, and Physics-Informed Residual), with a focus on strong out-of-distribution generalization and linear scaling.
+BOOST-RPF reformulates radial power-flow voltage prediction from global graph regression to sequential root-to-leaf path learning. The framework evaluates three variants (Absolute Voltage, Parent Residual, and Physics-Informed Residual), with a focus on fast training, strong out-of-distribution generalization, and linear scaling.
 
 ## Getting Started
 
@@ -21,7 +22,7 @@ conda activate boost-rpf
 
 ## Data
 
-- **ENGAGE dataset**: Use the ENGAGE benchmark resources here: https://zenodo.org/records/15464235
+- **ENGAGE dataset**: Use the ENGAGE benchmark resources from [Zenodo](https://zenodo.org/records/15464235)
   - This repository expects that **the full dataset** is downloaded and renamed to `data/ENGAGE_dataset/` (relative to this project root).
   - You should then run  
     &emsp; `python scripts/prepare_data.py`  
@@ -43,8 +44,11 @@ data/
     ├── Kerber_Dorfnetz/
     ├── 1-LV-rural1--1-no_sw/
     ├── 1-LV-rural2--1-no_sw/
-    ├── 1-MV-comm--1-no_sw/
-    └── ... (other grid configurations)
+    ├── 1-LV-rural3--1-no_sw/
+    ├── 1-LV-semiurb4--1-no_sw/
+    ├── 1-LV-semiurb5--1-no_sw/
+    ├── 1-LV-urban6--1-no_sw/
+    └── ... (other unused grid configurations)
 ```
 
 ## Benchmark Script
@@ -106,10 +110,10 @@ The full paper is currently under review. If you find this code or the BOOST-RPF
 @article{okoyomon2026boostrpf,
   title={BOOST-RPF: Boosted Sequential Trees for Radial Power Flow},
   author={Okoyomon, Ehimare and Goebel, Christoph},
-  journal={arXiv preprint arXiv:2603.xxxxx},
+  journal={arXiv preprint arXiv:2603.21977},
   year={2026},
-  url={https://arxiv.org/abs/2603.xxxxx},
-  eprint={2603.xxxxx},
+  url={https://arxiv.org/abs/2603.21977},
+  eprint={2603.21977},
   archivePrefix={arXiv},
   primaryClass={cs.LG}
 }
