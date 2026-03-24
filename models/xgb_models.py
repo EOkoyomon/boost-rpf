@@ -145,24 +145,9 @@ class NativeXGBModelWrapper:
             min_child_weight=5,
             subsample=0.9,
             colsample_bytree=1.0,
-            # 'one_output_per_tree' is similar to Darts' multi_models=True
             multi_strategy="multi_output_tree",
-            # multi_strategy="one_output_per_tree",
             objective="reg:squarederror"
         )
-        # self.model = xgb.XGBRFRegressor(
-        #     n_estimators=200,
-        #     max_depth=7,
-        #     # Note: learning_rate is usually 1.0 for RF;
-        #     # setting it to 0.5 may result in underfitting.
-        #     learning_rate=1.0,
-        #     random_state=random_state,
-        #     # Random Forests require subsampling and colsample to work effectively
-        #     subsample=0.8,
-        #     colsample_bynode=0.8,
-        #     multi_strategy="one_output_per_tree",
-        #     objective="reg:squarederror"
-        # )
         
         self.target_scaler = StandardScaler() if normalize else None
         self.covariate_scaler = StandardScaler() if normalize else None

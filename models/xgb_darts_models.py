@@ -341,19 +341,6 @@ class XGBModel_Linear(XGBModelWrapper):
                          output_chunk_length=output_chunk_length,
                          random_state=random_state,
                          prediction_scheme='linear')
-        # self.model = XGBModel(
-        #     lags=self.lags,
-        #     lags_future_covariates=self.lags_future_covariates,
-        #     output_chunk_length=1,
-        #     random_state=42,
-        #     multi_models=True,
-        #     subsample=0.8,
-        #     max_depth=9,
-        #     n_estimators=200,
-        #     learning_rate=0.02,
-        #     min_child_weight=20, # If your paths are very short (length 2), a weight of 20 might be too high. This parameter controls how much "evidence" (samples) a leaf node needs. If it's too high, the model will refuse to split and will just predict a flat average
-        #     colsample_bytree=0.9
-        # )
 
 class XGBModel_Normalized(XGBModelWrapper):
     def __init__(self, lags=1, lags_future_covariates=[0], output_chunk_length=1, random_state=42):
