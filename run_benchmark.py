@@ -124,11 +124,6 @@ def parse_args():
         type=int,
         help="The experiment group to analyze (1, 2, or 3). If not provided, analyzes all experiments together."
     )
-    parser.add_argument(
-        "--show_error_accumulation",
-        action="store_true",
-        help="For sequential models, show how error accumulates with hops from slack. Only applies to sequential models and requires a trained model to be loaded using --load_model_dir and --load_model_name."
-    )
     args = parser.parse_args()
     return args
 
@@ -222,8 +217,7 @@ def evaluate_performance_sequential(model_class,
                                     eval_only=False,
                                     load_model_dir=None,
                                     model_load_experiment_id='0',
-                                    experiment_id='0',
-                                    show_error_accumulation=False):
+                                    experiment_id='0'):
     """
     Evaluate sequential models that operate on path sequences.
 
@@ -275,9 +269,6 @@ def evaluate_performance_sequential(model_class,
                                                           plot=plot)
 
     corresponding_train_loss = total_epochs = -1
-
-    if show_error_accumulation:
-        _ = plot_error_accumulation(model=model, loader_test=loader_test)
 
     return rmse_vm, rmse_va, validation_error, corresponding_train_loss, total_epochs, train_time, inference_time_ms
 
@@ -439,8 +430,7 @@ def run_benchmark(args):
                                         eval_only=eval_only,
                                         load_model_dir=load_model_dir,
                                         model_load_experiment_id=f"{load_model_name if load_model_name else model.__name__}_{case_name}",
-                                        experiment_id=f"{model.__name__}_{case_name}",
-                                        show_error_accumulation=args.show_error_accumulation)
+                                        experiment_id=f"{model.__name__}_{case_name}")
             else:
                 rmse_vm, rmse_va, best_val_loss, corresponding_train_loss, total_epochs, train_time, inference_time_ms = \
                     evaluate_performance(model_class=model,

@@ -405,8 +405,6 @@ def test(model,
                     num_graphs = inputs.shape[0] # Batch size
                 else:
                     batch_test = batch_test.to(device)
-                    # TODO: Figure out inference time for batches predictions, do inference
-                    # without batching, or measure during post-processing.
                     if torch.cuda.is_available():
                         torch.cuda.synchronize()
                     start = time.time()
@@ -428,7 +426,6 @@ def test(model,
 
                 # Figuring out smallest and largest is too complicated in batch mode,
                 # so just do the first and second graphs in the batch for simplicity.
-
                 if plot and largest_error == 0:
                     largest_error = 1
                     num_points = min(100, len(pred)) // 2 # Pick first 100 points for plotting. Arbitrary.
@@ -456,25 +453,17 @@ def test(model,
 
 def train_sequential(model,
                      loader_train,
-                     loader_val,
-                     epochs=100,
-                     save_model_to=''):
+                     loader_val):
     """
     Train a sequential model with early stopping and optional best weights saving.
     Args:
         model (darts Model): The PyTorch model to be trained.
         loader_train (list[Object]): DataLoader for the training dataset.
         loader_val (list[Object]): DataLoader for the validation dataset.
-        epochs (int, optional): Maximum number of training epochs. Defaults to 100.
-        save_model_to (str, optional): Path to save the final model weights. If empty, model is not saved. Defaults to ''.
     Returns:
-        tuple: (train_loss_vec, val_loss_vec, best_val_loss, corresponding_train_loss, total_epochs, train_time)
-            - train_loss_vec (np.array): Training loss values over epochs.
-            - val_loss_vec (np.array): Validation loss values over epochs.
-            - best_val_loss (float): Best validation loss achieved.
-            - corresponding_train_loss (float): Training loss corresponding to the best validation loss.
-            - total_epochs (int): Total number of epochs run (may be less than max epochs due to early stopping).
+        tuple: (train_time, validation_error)
             - train_time (float): Total training time in seconds.
+            - validation_error (float): Validation error corresponding to the best model.
     """
     # Train the model
     start_time = time.time()
@@ -593,6 +582,7 @@ def test_sequential(model,
 
     if plot:
         plot_predictions(smallest_error_pred[1:], smallest_error_true[1:], largest_error_pred[1:], largest_error_true[1:]) # Skip slack
+        plot_error_accumulation(model=model, loader_test=loader_test)
 
     return rmse_vm, rmse_va, avg_inference_time_ms
 
