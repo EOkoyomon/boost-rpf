@@ -31,15 +31,6 @@ class GlobalMLP(nn.Module):
         # Output layer
         self.readout = nn.Linear(hidden_dim, out_dim)
 
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return True
-
-    def is_complex(self):
-        return False
-
     def is_analytical(self):
         return False
 
@@ -89,15 +80,6 @@ class CustomNormedMLP(nn.Module):
         # Activations
         self.leakyReLU = nn.LeakyReLU(negative_slope=0.2)
     
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return True
-
-    def is_complex(self):
-        return False
-
     def is_analytical(self):
         return False
 

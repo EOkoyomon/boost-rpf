@@ -11,8 +11,6 @@ from tqdm import tqdm
 import time
 import os
 
-from utils.physics_informed_loss_optimized import create_batch_physics_loss
-
 def create_log_dir():
     """
     Create a logging directory for the current run.
@@ -127,18 +125,6 @@ def normalized_mse_loss(pred, target, eps=1e-8):
     # Return the mean loss across all elements
     return weighted_mse.mean()
 
-def complex_mse_loss(y_pred, y_true):
-    """
-    Compute mean squared error loss for complex-valued predictions.
-    Args:
-        y_pred (torch.Tensor): Predicted complex values.
-        y_true (torch.Tensor): True complex values.
-
-    Returns:
-        torch.Tensor: The computed mean squared error loss.
-    """
-    return torch.mean(torch.abs(y_pred - y_true)**2)
-
 def train(model,
           device,
           loader_train,
@@ -175,24 +161,8 @@ def train(model,
     """
     # Configure hyperparameters
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-    # optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9, nesterov=True)
-    
-    # Add learning rate scheduler for physics-informed training
-    # Start high to escape poor local minima, then reduce for fine-tuning
-    # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #     optimizer, mode='min', factor=0.1, patience=patience//3, min_lr=learning_rate*0.01
-    # )
-    # OneCycleLR is great for "jumping" over poor local minima early on
-    # scheduler = torch.optim.lr_scheduler.OneCycleLR(
-    #     optimizer, max_lr=learning_rate, steps_per_epoch=len(loader_train), epochs=epochs
-    # )
     
     loss_fn = normalized_mse_loss
-    # Standard MSE loss (not normalized)
-    # loss_fn = nn.MSELoss()
-    
-    # This helps balance supervised vs physics loss contributions
-    lambda_phys = 0.00001  # Weight for physics loss if used
 
     # Variables to track best model
     best_val_loss = np.Inf
@@ -202,7 +172,7 @@ def train(model,
 
     # Setup arrays to track training performance
     train_loss_vec = np.empty(epochs)
-    train_loss_vec[:] = np.nan 
+    train_loss_vec[:] = np.nan
     val_loss_vec = np.empty(epochs)
     val_loss_vec[:] = np.nan
 
@@ -210,16 +180,9 @@ def train(model,
     start = time.time()
     total_epochs = -1
 
-    assert model.is_supervised() or model.use_physics_loss() or model.is_analytical(), (
-        "Model must be supervised, use physics loss, or be analytical."
-    )
-
     if model.is_analytical():
         # Does not need to be trained
         return train_loss_vec, val_loss_vec, best_val_loss, corresponding_train_loss, total_epochs, 0.0
-
-    if model.is_complex():
-        loss_fn = complex_mse_loss # Use MSE loss for complex models. Only one output (complex voltage).
 
     model = model.to(device)
     for epoch in tqdm(range(epochs)):
@@ -249,7 +212,6 @@ def train(model,
             loss = loss_fn(predictions, ground_truth)
             loss.backward()
             optimizer.step()
-            # scheduler.step()
             loss_train += loss.item()*num_graphs
         loss_train /= len(loader_train.dataset)
 
@@ -291,9 +253,6 @@ def train(model,
                 break
             else:
                 wait += 1
-
-        # Step learning rate scheduler
-        # scheduler.step(loss_val)
         
         # Track model performance
         train_loss_vec[epoch] = loss_train
@@ -302,64 +261,6 @@ def train(model,
             print('Epoch: {} Train Loss: {:.6f} Valid Loss: {:.6f} LR: {:.2e}'
                     .format(epoch + 1, loss_train, loss_val, optimizer.param_groups[0]['lr']), flush=True)
 
-    if model.use_physics_loss():
-        physics_loss = create_batch_physics_loss(device=device, is_complex=model.is_complex()) # Create physics loss function for batches
-       # Variables to track best model
-        best_val_loss_physics = best_val_loss
-        best_weights_physics = best_weights
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
-        physics_fine_tuning_epochs = 20
-        for epoch in tqdm(range(physics_fine_tuning_epochs)):
-            # Train for some more epochs to fine-tune with physics loss
-            model.train()
-            loss_train = 0
-
-            for batch_train in loader_train:
-                optimizer.zero_grad()
-                batch_train = batch_train.to(device)
-                pred = model(batch_train)
-                hops_to_slack = batch_train.x.shape[-1] - 1
-                pq_mask = (batch_train.x[:, hops_to_slack] != 0)
-
-                # Separate the batch into individual graphs for physics loss calculation
-                # We use boolean mask (batch_train.batch == i) to select the rows, i.e. nodes, of pred that belong to graph i.
-                batch_predictions = [pred[(batch_train.batch == i)] for i in range(batch_train.num_graphs)]
-                loss = physics_loss(batch_predictions, batch_train.to_data_list())
-
-                loss.backward()
-                optimizer.step()
-                loss_train += loss.item()*batch_train.num_graphs
-            loss_train /= len(loader_train.dataset)
-
-            # Validate
-            model.eval()
-            loss_val = 0
-
-            # Disable gradient tracking during validation for efficiency
-            with torch.no_grad():
-                for batch_val in loader_val:
-                    batch_val = batch_val.to(device)
-                    pred = model(batch_val)
-                    hops_to_slack = batch_val.x.shape[-1] - 1
-                    pq_mask = (batch_val.x[:, hops_to_slack] != 0)
-
-                    # Separate the batch into individual graphs for physics loss calculation
-                    batch_predictions = [pred[(batch_val.batch == i)] for i in range(batch_val.num_graphs)]
-                    loss = physics_loss(batch_predictions, batch_val.to_data_list())
-
-                    loss_val += loss.item()*batch_val.num_graphs
-            loss_val /= len(loader_val.dataset)
-
-            # Early stopping and update of best model
-            if best_val_weights and loss_val < best_val_loss_physics:
-                    best_weights_physics = model.state_dict()
-                    best_val_loss_physics = loss_val
-                    corresponding_train_loss = loss_train
-
-            if log_epochs:
-                print('Physics Fine-tuning Epoch: {} Train Loss: {:.6f} Valid Loss: {:.6f} LR: {:.2e}'
-                        .format(epoch + 1, loss_train, loss_val, optimizer.param_groups[0]['lr']), flush=True)
-
     # Total training time
     train_time = time.time() - start
 
@@ -367,11 +268,7 @@ def train(model,
     total_epochs = epochs if total_epochs == -1 else total_epochs
 
     if best_val_weights:
-        model.load_state_dict(best_weights if not model.use_physics_loss() else best_weights_physics)
-
-    if  model.use_physics_loss():
-        best_val_loss = best_val_loss_physics
-        total_epochs += physics_fine_tuning_epochs
+        model.load_state_dict(best_weights)
 
     if save_model_to:
         torch.save(model.state_dict(), save_model_to)
@@ -525,10 +422,6 @@ def test(model,
                     pred = pred[pq_mask]
                     true_y = batch_test.y[pq_mask]
                     num_graphs = batch_test.num_graphs
-                if model.is_complex():
-                    # For complex models, convert complex voltage to [vm_pu, va_degree]
-                    pred = torch.cat([pred.abs(), pred.angle()], dim=1)
-                    true_y = torch.cat([true_y.abs(), true_y.angle()], dim=1)
                 loss_rmse = rmse_wrapped_va(pred, true_y) # [vm_pu, va_degree]
                 rmse_vm += loss_rmse[0].item()*num_graphs
                 rmse_va += loss_rmse[1].item()*num_graphs

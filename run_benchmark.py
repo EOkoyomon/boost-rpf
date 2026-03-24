@@ -169,8 +169,6 @@ def evaluate_performance(model_class,
 
     # Create model
     model = model_class().to(device)
-    if not model.is_supervised():
-        learning_rate = 1e-2
 
     if load_model_dir:
         load_model_path = get_model_save_path(load_model_dir,

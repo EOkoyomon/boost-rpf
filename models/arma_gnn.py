@@ -32,15 +32,6 @@ class ARMA_GNN(nn.Module):
         # Output layer
         self.readout = nn.Linear(hidden_dim, output_dim)
     
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return True
-
-    def is_complex(self):
-        return False
-
     def is_analytical(self):
         return False
 

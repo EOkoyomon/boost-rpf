@@ -11,15 +11,6 @@ class LinDistFlow(nn.Module):
     def __init__(self):
         super().__init__()
 
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return False
-
-    def is_complex(self):
-        return False
-
     def is_analytical(self):
         return True
 
@@ -31,15 +22,6 @@ class LinDistFlow(nn.Module):
 class DistFlow(nn.Module):
     def __init__(self):
         super().__init__()
-
-    def use_physics_loss(self):
-        return False
-
-    def is_supervised(self):
-        return False
-
-    def is_complex(self):
-        return False
 
     def is_analytical(self):
         return True
