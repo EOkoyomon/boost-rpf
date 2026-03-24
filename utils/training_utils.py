@@ -1,8 +1,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-# import torch.utils.data
-# from torch_scatter import scatter_add
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 import simbench as sb

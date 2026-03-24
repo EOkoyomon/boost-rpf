@@ -22,8 +22,11 @@ conda activate boost-rpf
 ## Data
 
 - **ENGAGE dataset**: Use the ENGAGE benchmark resources here: https://zenodo.org/records/15464235
-  - This repository expects that this dataset is renamed to `data/ENGAGE_dataset/` (relative to this project root).
-  - This data is used to run Experiments 2 (Heterogeneous Grids) and 3 (OOD).
+  - This repository expects that **the full dataset** is downloaded and renamed to `data/ENGAGE_dataset/` (relative to this project root).
+  - You should then run  
+    &emsp; `python scripts/prepare_data.py`  
+    to add relevant pandapower information to the data objects (needed for some models).
+  - This data is used to run Experiment 2 (Heterogeneous Grids) and Experiment 3 (OOD).
 - **Kerber data generation**: workflow via `scripts/graph_gen.py`.
   - The script supports synthetic grid generation and includes helpers for Kerber-style data creation.
   - This script was modified from the [ENGAGE project repo](https://gitlab.lrz.de/energy-management-technologies-public/engage/) and requires powerdata-gen library as a submodule/dependency (see https://gitlab.lrz.de/energy-management-technologies-public/engage#dependencies for details on how to set this up smoothly).  
@@ -84,6 +87,7 @@ python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model distflow ldf --s
 
 ## `scripts/` overview
 
+- `scripts/prepare_data.py`: utility to augment the PyG graph datasets with more grid information from pandapower.
 - `scripts/graph_gen.py`: data-generation utilities for pandapower-based grids, including Kerber.
 - `scripts/precompute_paths.py`: precomputes sequential path features/targets and saves them for faster loading.
 - `scripts/tune_xgboost.py`: random/grid search for XGBoost-based sequential models (`xgb-absolute`, `xgb-parent`, `xgb-ldf`).
