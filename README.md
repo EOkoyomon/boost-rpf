@@ -1,7 +1,6 @@
 # BOOST-RPF
 
-Repository accompanying experiment code for the paper **"BOOST-RPF: Boosted Sequential Trees for Radial Power Flow"**.  
-&emsp; Identifier: [**https://doi.org/10.48550/arXiv.2603.21977**](https://doi.org/10.48550/arXiv.2603.21977).
+Repository accompanying experiment code for the paper **"BOOST-RPF: Boosted Sequential Trees for Radial Power Flow"**. Identifier: [**https://doi.org/10.48550/arXiv.2603.21977**](https://doi.org/10.48550/arXiv.2603.21977).
 
 BOOST-RPF reformulates radial power-flow voltage prediction from global graph regression to sequential root-to-leaf path learning. The framework evaluates three variants (Absolute Voltage, Parent Residual, and Physics-Informed Residual), with a focus on fast training, strong out-of-distribution generalization, and linear scaling.
 
