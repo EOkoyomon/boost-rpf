@@ -10,13 +10,14 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 import torch
-from scipy.sparse import find
 from torch.utils.data import random_split, TensorDataset
 from torch.utils.data import DataLoader as TabularDataLoader
 from torch_geometric.data import Data
 from torch_geometric.loader import DataLoader
 from torch_geometric.utils import to_networkx
 from tqdm import tqdm
+
+from models.lindistflow import calculate_lindistflow_iterative
 
 DATASET_CACHE = {}
 
@@ -178,7 +179,7 @@ def get_pyg_graphs(data_dir, grid_type):
     pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
     return pyg_dataset
 
-def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=-150.0):
+def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=0.0):
     """
     Extract all root-to-node paths from a single PyG data sample and compute features.
     
@@ -195,9 +196,12 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     Args:
         data: PyTorch Geometric Data object with ppci attribute (raw, untransformed)
         slack_index (int): Index of the slack bus (usually 0)
-        slack_vm_pu (float): Voltage magnitude at slack bus in p.u.
-        slack_va_degree (float): Voltage angle at slack bus in degrees
-        
+        slack_vm_pu (float): Deprecated/ignored. The true slack magnitude is read from
+            data.y[slack_index, 2]. Kept for backward-compatible call signatures.
+        slack_va_degree (float): Deprecated/ignored. The true slack (ext_grid) angle is read from
+            data.y[slack_index, 3]; the ~150deg transformer phase shift is applied per-edge inside
+            the LDF sweep, so this must NOT be pre-seeded to -150. Kept for signature compatibility.
+
     Returns:
         list of dict: Each dict contains:
             - 'path': list of node indices from slack to target node
@@ -205,103 +209,41 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
             - 'targets': np.array of shape (path_length, 2) with [V_j, theta_j]
             - 'target_node': the final node in the path
     """
-    # 1. Extract Data from Source (following calculate_distflow_iterative)
-    Ybus = data.ppci["Ybus"].copy()
-    
-    # ppci Sbus is Net Injection. We need Net Load.
-    Sbus = -1 * data.ppci["Sbus"].copy()
-    num_ppci_nodes = Sbus.shape[0]
-    num_pyg_nodes = len(data.x)
-    
-    P_load = Sbus.real
-    Q_load = Sbus.imag
-    
-    # Get ground truth voltages from y labels
+    # 1. Ground truth voltages from y labels
     # y format: [p_mw, q_mvar, vm_pu, va_degree]
     V_true = data.y[:, 2].numpy()  # vm_pu
     theta_true = data.y[:, 3].numpy()  # va_degree
 
-    slack_vm_pu = data.y[slack_index, 2].numpy()
-    # slack_va_degree = data.y[slack_index, 3].numpy()
-    V_true[slack_index] = slack_vm_pu
-    theta_true[slack_index] = slack_va_degree
-    
-    # 2. Build Network Graph from Ybus
-    G = nx.DiGraph()
-    G.add_nodes_from(range(num_ppci_nodes))
-    rows, cols, vals = find(Ybus)
-    
-    for r, c, val in zip(rows, cols, vals):
-        if r != c:  # Off-diagonal elements represent branches
-            z_pu = -1.0 / val  # Z = -1/Y for off-diagonal
-            G.add_edge(r, c, r=z_pu.real, x=z_pu.imag)
-    
-    # 3. Build paths from slack to all nodes
-    try:
-        paths = nx.shortest_path(G, source=slack_index)
-    except nx.NetworkXNoPath:
-        bfs_tree = nx.bfs_tree(G, source=slack_index)
-        paths = nx.shortest_path(bfs_tree, source=slack_index)
-    
-    # Pre-fetch edge attributes
-    edge_r = nx.get_edge_attributes(G, 'r')
-    edge_x = nx.get_edge_attributes(G, 'x')
+    num_pyg_nodes = len(data.x)
 
-    # degrees_dict = dict(G.degree())
-    
-    # 4. Backward Sweep - Compute aggregated power (P_agg, Q_agg)
-    sorted_nodes = sorted(paths.keys(), key=lambda n: len(paths[n]))
-    P_agg = P_load.copy()
-    Q_agg = Q_load.copy()
-    
-    # Map each node to its parent
-    parents = {}
-    for node in paths:
-        if node != slack_index:
-            parents[node] = paths[node][-2]
-    
-    # Iterate from leaves to root (backward sweep)
-    for node in sorted_nodes[::-1]:
-        if node == slack_index:
-            continue
-        parent = parents[node]
-        P_agg[parent] += P_agg[node]
-        Q_agg[parent] += Q_agg[node]
-    
-    # 5. Forward Sweep - Compute LinDistFlow baseline voltages
-    V_LDF = np.zeros(num_ppci_nodes)
-    V_LDF[slack_index] = slack_vm_pu
-    
-    theta_LDF = np.zeros(num_ppci_nodes)
-    theta_LDF[slack_index] = np.deg2rad(slack_va_degree)
-    
-    # Store computed values for each node during forward sweep
-    for node in sorted_nodes:
-        if node == slack_index:
-            continue
-        
-        parent = parents[node]
-        
-        # Get branch impedance
-        if (parent, node) in edge_r:
-            r_ij = edge_r[(parent, node)]
-            x_ij = edge_x[(parent, node)]
-        elif (node, parent) in edge_r:
-            r_ij = edge_r[(node, parent)]
-            x_ij = edge_x[(node, parent)]
-        else:
-            r_ij = 0.0
-            x_ij = 0.0
-        
-        # LinDistFlow equations from methodology:
-        # V_j ≈ V_i - (r_ij * P_agg_j + x_ij * Q_agg_j) / V_0
-        # theta_j ≈ theta_i - (x_ij * P_agg_j - r_ij * Q_agg_j) / V_0^2
-        V_LDF[node] = V_LDF[parent] - (r_ij * P_agg[node] + x_ij * Q_agg[node]) / slack_vm_pu
-        theta_LDF[node] = theta_LDF[parent] - (x_ij * P_agg[node] - r_ij * Q_agg[node]) / (slack_vm_pu ** 2)
+    # True slack (ext_grid) state.
+    slack_vm_pu = data.y[slack_index, 2].item()
+    slack_va_degree = data.y[slack_index, 3].item()
 
-    theta_LDF_deg = np.rad2deg(theta_LDF)
+    # 2. Compute the LinDistFlow baseline via the implementation in
+    # `models/lindistflow.py` instead of duplicating the sweep here.
+    # `return_internals=True` gives us the intermediate quantities (tree paths, 
+    # per-edge r/x, aggregated P/Q, LDF V/theta) needed to build the branch
+    # features below.
+    _, _, internals = calculate_lindistflow_iterative(
+        data,
+        slack_index=slack_index,
+        slack_vm_pu=slack_vm_pu,
+        slack_va_degree=slack_va_degree,
+        return_internals=True,
+    )
 
-    # 6. Extract paths for each non-slack node (up to num_pyg_nodes)
+    paths = internals["paths"]
+    edge_r = internals["edge_r"]
+    edge_x = internals["edge_x"]
+    P_load = internals["P_load"]
+    Q_load = internals["Q_load"]
+    P_agg = internals["P_flow"]  # backward-swept (aggregated) active power per node
+    Q_agg = internals["Q_flow"]  # backward-swept (aggregated) reactive power per node
+    V_LDF = internals["vm_full"]  # LDF voltage magnitude (p.u.), all ppci nodes
+    theta_LDF_deg = internals["va_full"]  # LDF voltage angle (degrees), all ppci nodes
+
+    # 3. Extract paths for each non-slack node (up to num_pyg_nodes)
     path_data_list = []
     
     for target_node in range(1, num_pyg_nodes):  # Skip slack (node 0)
@@ -408,7 +350,7 @@ def get_tabular_data(data_dir, grid_type):
 
     return TensorDataset(torch.tensor(x_data, dtype=torch.float32), torch.tensor(y_data, dtype=torch.float32))
 
-def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.0):
+def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=0.0):
     """
     Load grid data and convert to sequential path format for darts time series training.
     
@@ -419,8 +361,11 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.
     Args:
         data_dir (str): Base directory where datasets are stored.
         grid_type (str): The type of sb grid (e.g., '1-LV-rural1--1-no_sw', '1-MV-urban--1-no_sw', etc.)
-        slack_vm_pu (float): Voltage magnitude at slack bus in p.u. Default 1.025.
-        slack_va_degree (float): Voltage angle at slack bus in degrees. Default -150.0.
+        slack_vm_pu (float): Deprecated/ignored — the true slack magnitude is read per-sample from
+            the labels. Kept for backward-compatible call signatures.
+        slack_va_degree (float): Deprecated/ignored — the true slack (ext_grid) angle is read
+            per-sample from the labels and the transformer phase shift is applied per-edge in the
+            LDF sweep. Must not be pre-seeded to -150. Kept for signature compatibility.
     
     Returns:
         list of dict: Each dict represents one network sample and contains:
@@ -495,6 +440,7 @@ def load_precomputed_paths(data_dir, grid_type):
     """
     # Load pre-computed data
     precomputed_path = os.path.join(data_dir, grid_type, 'train', 'dataset_sequential.pkl')
+    print(precomputed_path)
 
     if not os.path.exists(precomputed_path):
         raise FileNotFoundError(

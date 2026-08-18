@@ -435,7 +435,7 @@ def main():
         if args.experiment is not None:
             df = df[df['experiment'] == args.experiment]
 
-        df = df[df['model'] != 'LinDistFlow']
+        df = df[df['model'] != 'DistFlow']
 
         if args.raw:
             # Generate raw data table

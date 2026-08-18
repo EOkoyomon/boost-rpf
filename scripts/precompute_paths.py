@@ -25,7 +25,7 @@ from utils.training_utils import get_lv_grid_codes
 
 
 
-def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=-150.0):
+def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=0.0):
     """
     Pre-compute path data and save as numpy arrays (without TimeSeries objects).
     
