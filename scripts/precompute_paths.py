@@ -76,7 +76,7 @@ def main():
     if args.grids:
         grids = args.grids
     else:
-        grids = get_lv_grid_codes(scenario=1)
+        grids = ["Kerber_Dorfnetz"] + get_lv_grid_codes(scenario=1)
     
     print(f"Pre-computing paths for {len(grids)} grids...")
     
