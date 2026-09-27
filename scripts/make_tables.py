@@ -107,7 +107,9 @@ def format_model_name(model_name):
     """Format model name for display in table."""
     # Create shorter, cleaner display names
     name_mappings = {
-        'LinDistFlow': 'LinDistFlow',
+        'XGB_Absolute_Fast': 'XGB-Absolute',
+        'XGB_Parent_Fast': 'XGB-Parent',
+        'XGB_LDF_Fast': 'XGB-LDF',
     }
     return name_mappings.get(model_name, model_name.replace('_', '-'))
 
@@ -434,8 +436,13 @@ def main():
         df = pd.read_csv(csv_path)
         if args.experiment is not None:
             df = df[df['experiment'] == args.experiment]
+        else:
+            df = df[df['experiment'].isin([1, 2, 3])]
 
         df = df[df['model'] != 'DistFlow']
+        df = df[df['model'] != 'XGB_Absolute_Slow']
+        df = df[df['model'] != 'XGB_Parent_Slow']
+        df = df[df['model'] != 'XGB_LDF_Slow']
 
         if args.raw:
             # Generate raw data table

@@ -125,7 +125,8 @@ def parse_args():
     parser.add_argument(
         "--experiment",
         type=int,
-        help="The experiment group to analyze (1, 2, 3, or 4). If not provided, analyzes all experiments together."
+        nargs="+",
+        help="The experiment group to analyze (1, 2, 3, and/or 4). If not provided, analyzes all experiments together."
     )
     args = parser.parse_args()
     return args
@@ -335,7 +336,7 @@ def run_benchmark(args):
         log_dir = create_log_dir()
     
     # Select experiment cases based on argument
-    selected_experiments = [args.experiment] if args.experiment else [1, 2, 3, 4]
+    selected_experiments = args.experiment if args.experiment else [1, 2, 3, 4]
 
     # Only compare LV networks because radial
     test_cases = []
@@ -415,6 +416,8 @@ def run_benchmark(args):
             case_name = ''
             if training_grids[0] == 'Kerber_Dorfnetz':
                 case_name = 'Kerber_Dorfnetz'
+            elif training_grids[0] == 'IEEE_European_LV':
+                case_name = 'IEEE_European_LV'
             elif testing_grid:
                 case_name = testing_grid
             else:

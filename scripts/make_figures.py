@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from make_tables import format_model_name
 
 def plot_inference_time_scaling(df_all, grid_to_num_noodes, save=False):
     # For every model in the dataframe, plot inference time vs number of nodes as a line plot
@@ -23,7 +24,7 @@ def plot_inference_time_scaling(df_all, grid_to_num_noodes, save=False):
                     inference_time = df_model[df_model['testing_grid'] == grid]['inference_time_ms'].values.mean()
                     x.append(num_nodes)
                     y.append(inference_time)
-        model_label = model.replace('_', '-')
+        model_label = format_model_name(model)
         plt.plot(x, y, label=model_label, marker='o', linestyle='-')
     plt.xlabel('Number of Nodes', fontsize=22)
     plt.ylabel('Inference Time (ms)', fontsize=22)
@@ -44,7 +45,7 @@ def plot_vm_boxplot(df_all, metric, save=False):
 
     # 1. Filter and prepare data
     df_ood = df_all[df_all['experiment'] == 3].copy() # Only OOD (Leave-one-out) scenarios
-    df_ood['model_label'] = df_ood['model'].str.replace('_', '-')
+    df_ood['model_label'] = df_ood['model'].apply(format_model_name)
 
     # 2. Balanced Figure Size - 8 wide, 6 tall is a standard "sweet spot" for papers
     plt.figure(figsize=(8, 6)) 
@@ -131,11 +132,14 @@ if __name__ == "__main__":
     for testing_grid in grid_to_num_noodes.keys():
         ldf_inference_time = df_all.loc[(df_all['model'] == 'LinDistFlow') & (df_all['testing_grid'] == testing_grid), 'inference_time_ms'].values[0]
         # Add ldf inference time to XGB_Absolute, XGB_Parent, XGB_LDF models for the same testing grid, because LDF is done before the XGB inference and is part of the total inference time for those models.
-        for model in ['XGB_Absolute', 'XGB_Parent', 'XGB_LDF']:
+        for model in ['XGB_Absolute_Slow', 'XGB_Parent_Slow', 'XGB_LDF_Slow']:
             df_all.loc[(df_all['model'] == model) & (df_all['testing_grid'] == testing_grid), 'inference_time_ms'] += ldf_inference_time
 
     # Skip LinDistFlow in plots
-    df_all = df_all[df_all['model'] != 'LinDistFlow']
+    df_all = df_all[df_all['model'] != 'DistFlow']
+    df_all = df_all[df_all['model'] != 'XGB_Absolute_Slow']
+    df_all = df_all[df_all['model'] != 'XGB_Parent_Slow']
+    df_all = df_all[df_all['model'] != 'XGB_LDF_Slow']
 
     # Make plots
     plot_inference_time_scaling(df_all, grid_to_num_noodes, save=args.save)
