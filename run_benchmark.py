@@ -41,6 +41,9 @@ from models.xgb_models import (
     XGB_Parent,
     XGB_Parent_Corrected,
     XGB_Parent_Normalized,
+    XGB_LDF_Fast,
+    XGB_Absolute_Fast,
+    XGB_Parent_Fast,
 )
 from utils.data_utils import get_dataloaders
 from utils.training_utils import (
@@ -285,6 +288,9 @@ MODEL_CLASSES = {
     "custom-mlp": CustomNormedMLP,
     "global-mlp": GlobalMLP,
     "arma-gnn": ARMA_GNN,
+    "xgb-absolute-fast": XGB_Absolute_Fast,
+    "xgb-parent-fast": XGB_Parent_Fast,
+    "xgb-ldf-fast": XGB_LDF_Fast,
 }
 ANALYTICAL_MODELS = [DC_PF, DC_PF_Slack, LinDistFlow, DistFlow]
 SEQUENTIAL_MODELS = [XGBModel_Basic,
@@ -293,6 +299,9 @@ SEQUENTIAL_MODELS = [XGBModel_Basic,
                      XGB_Absolute,
                      XGB_Parent,
                      XGB_LDF,
+                     XGB_Absolute_Fast,
+                     XGB_Parent_Fast,
+                     XGB_LDF_Fast,
                      XGB_Absolute_Normalized,
                      XGB_Parent_Normalized,
                      XGB_LDF_Normalized,

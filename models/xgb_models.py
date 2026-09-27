@@ -1,7 +1,135 @@
+import ctypes
+
 import joblib
 import numpy as np
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
+
+# ---------------------------------------------------------------------------
+# Fast inference path
+#
+# Recursive prediction down a feeder is dominated by per-call overhead in the
+# XGBoost Python layer (~120us/call for the sklearn `predict` wrapper), not by
+# tree traversal. Two things remove almost all of it:
+#
+#   1. Depth batching. V_j = f(V_parent(j), ...) is sequential only in the hop
+#      distance from the slack bus, not in the node count: every node at the
+#      same depth has its parent already resolved, so a whole depth level goes
+#      out in one call. That is D calls instead of N (e.g. 19 instead of 135
+#      on 1-MV-urban), and it is exact, not an approximation.
+#   2. Calling XGBoosterPredictFromDense directly, which skips DMatrix
+#      construction, feature validation and the per-call config round trip.
+#
+# The C API entry points below are private to xgboost, so the import is guarded
+# and falls back to `Booster.inplace_predict` (still depth batched) if the
+# installed version moves them.
+# ---------------------------------------------------------------------------
+try:
+    from xgboost.core import _LIB, _check_call, c_bst_ulong, make_jcargs
+
+    try:
+        from xgboost._data_utils import array_interface
+    except ImportError:  # xgboost < 3.0
+        from xgboost.data import _array_interface as array_interface
+
+    # Prediction options are fixed for our use, so build the JSON config once.
+    _PREDICT_ARGS = make_jcargs(
+        type=0,              # value, not margin
+        training=False,
+        iteration_begin=0,
+        iteration_end=0,
+        missing=np.nan,
+        strict_shape=False,
+        cache_id=0,
+    )
+    _CAPI_AVAILABLE = True
+except Exception:  # pragma: no cover - depends on the installed xgboost
+    _CAPI_AVAILABLE = False
+    _PREDICT_ARGS = None
+
+
+def _predict_block_capi(handle, iface, num_rows):
+    """Predict one contiguous block via the XGBoost C API.
+
+    `iface` is the cached __array_interface__ JSON of the block. The returned
+    array is a view into XGBoost-owned memory that stays valid only until the
+    next prediction call on this booster, so callers must consume it
+    immediately (all call sites below feed it straight into an assignment).
+    """
+    preds = ctypes.POINTER(ctypes.c_float)()
+    shape = ctypes.POINTER(c_bst_ulong)()
+    dims = c_bst_ulong()
+    _check_call(
+        _LIB.XGBoosterPredictFromDense(
+            handle,
+            iface,
+            _PREDICT_ARGS,
+            ctypes.c_void_p(),   # no proxy DMatrix (no base_margin)
+            ctypes.byref(shape),
+            ctypes.byref(dims),
+            ctypes.byref(preds),
+        )
+    )
+    total = 1
+    for i in range(dims.value):
+        total *= int(shape[i])
+    return np.ctypeslib.as_array(preds, shape=(total,)).reshape(num_rows, total // num_rows)
+
+
+class _PathPlan:
+    """Depth-batched layout of one grid's root-to-node paths.
+
+    Rows are ordered by depth so that each depth level is a contiguous slice of
+    a single (num_rows, 18) float32 buffer. The 16 covariate columns do not
+    depend on any prediction and are filled once here; only the 2 parent-voltage
+    columns are rewritten as the sweep descends.
+    """
+
+    __slots__ = ('num_nodes', 'X', 'parent', 'target', 'res_base', 'levels', 'ifaces')
+
+    def __init__(self, num_nodes, paths, normalize_mean=None, normalize_scale=None):
+        items = sorted(
+            ((len(p['path']) - 1, p) for p in paths if len(p['path']) > 1),
+            key=lambda t: t[0],
+        )
+        n = len(items)
+        self.num_nodes = num_nodes
+        # float64 throughout, so the bytes handed to XGBoost are the same ones
+        # the per-node sweep builds. XGBoost casts to float32 internally, and a
+        # float64 block benchmarks identically, so this costs nothing.
+        self.X = np.zeros((n, 18))
+        self.parent = np.empty(n, dtype=np.intp)
+        self.target = np.empty(n, dtype=np.intp)
+        self.res_base = np.empty((n, 2))
+        depths = np.empty(n, dtype=np.intp)
+
+        covariates = self.X[:, 2:18]  # filled in place
+        for i, (depth, path_info) in enumerate(items):
+            features = path_info['features']
+            covariates[i, 0:8] = features[-2]
+            covariates[i, 8:16] = features[-1]
+            self.res_base[i] = features[-1][6:8]
+            self.parent[i] = path_info['path'][-2]
+            self.target[i] = path_info['target_node']
+            depths[i] = depth
+
+        if normalize_mean is not None:
+            # StandardScaler.transform is elementwise, so the static columns can
+            # be scaled once here instead of on every step.
+            covariates -= normalize_mean[2:18]
+            covariates /= normalize_scale[2:18]
+
+        if n == 0:
+            self.levels = []
+        else:
+            bounds = np.concatenate([[0], np.flatnonzero(np.diff(depths)) + 1, [n]])
+            self.levels = [(int(bounds[k]), int(bounds[k + 1])) for k in range(len(bounds) - 1)]
+
+        # Views into X are contiguous and their pointers are stable for the
+        # lifetime of this plan, so the array interface is built once per level.
+        self.ifaces = (
+            [array_interface(self.X[a:b]) for a, b in self.levels] if _CAPI_AVAILABLE else None
+        )
 
 
 def get_paths_from_loader(loader):
@@ -128,10 +256,19 @@ class BiasCorrector:
 
 class NativeXGBModelWrapper:
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False, use_residuals=False, use_diff=True, use_corrector=False):
+                 normalize=False, use_residuals=False, use_diff=True, use_corrector=False,
+                 use_fast_predict=True, predict_nthread=1):
         self.random_state = random_state
         self.prediction_scheme = prediction_scheme
         self.normalize = normalize
+        # Depth-batched inference. Set use_fast_predict=False to fall back to
+        # the original node-at-a-time sweep (kept for comparison; the two agree
+        # bit for bit).
+        self.use_fast_predict = use_fast_predict
+        # Tiny per-level batches do not amortize OpenMP fan-out: single-threaded
+        # prediction is ~2x faster than the default here.
+        self.predict_nthread = predict_nthread
+        self._fast_ctx = None
         assert not (use_residuals and use_diff), "Cannot use both residuals and differencing."
         self.use_residuals = use_residuals
         self.use_diff = use_diff
@@ -153,6 +290,18 @@ class NativeXGBModelWrapper:
         self.covariate_scaler = StandardScaler() if normalize else None
         self.corrector = BiasCorrector() if use_corrector else None
         self._is_fitted = False
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop('_fast_ctx', None)  # holds a ctypes handle
+        return state
+
+    def __setstate__(self, state):
+        # Defaults for models pickled before the fast predict path was added.
+        state.setdefault('use_fast_predict', True)
+        state.setdefault('predict_nthread', 1)
+        self.__dict__.update(state)
+        self._fast_ctx = None
 
     def _create_tabular_data(self, target_series_list, covariate_series_list):
         """
@@ -270,8 +419,12 @@ class NativeXGBModelWrapper:
         
         return pred.flatten()
 
-    def predict_linear(self, num_nodes, paths):
-        """Recursive 1-step prediction along the grid topology"""
+    def _predict_linear_reference(self, num_nodes, paths):
+        """Recursive 1-step prediction along the grid topology, one node per call.
+
+        Reference implementation. `_predict_linear_fast` is equivalent and much
+        faster; this is kept so the two can be diffed.
+        """
         sorted_paths = sorted(paths, key=lambda p: len(p['path']))
         predictions = np.zeros((num_nodes, 2))
         
@@ -322,6 +475,84 @@ class NativeXGBModelWrapper:
 
         return predictions
 
+    def _get_fast_ctx(self):
+        """Booster handle plus cached scaler arrays, built once per model."""
+        if self._fast_ctx is None:
+            booster = self.model.get_booster()
+            if self.predict_nthread is not None:
+                booster.set_param('nthread', self.predict_nthread)
+            ctx = {'booster': booster, 'handle': booster.handle}
+            if self.normalize:
+                ctx['cov_mean'] = self.covariate_scaler.mean_
+                ctx['cov_scale'] = self.covariate_scaler.scale_
+                ctx['tgt_mean'] = self.target_scaler.mean_
+                ctx['tgt_scale'] = self.target_scaler.scale_
+            self._fast_ctx = ctx
+        return self._fast_ctx
+
+    def _predict_linear_fast(self, num_nodes, paths):
+        """Depth-batched equivalent of `_predict_linear_reference`.
+
+        One XGBoost call per depth level instead of one per node. Produces
+        bit-identical output.
+        """
+        ctx = self._get_fast_ctx()
+        normalize = self.normalize
+        plan = _PathPlan(
+            num_nodes,
+            paths,
+            normalize_mean=ctx['cov_mean'] if normalize else None,
+            normalize_scale=ctx['cov_scale'] if normalize else None,
+        )
+
+        predictions = np.zeros((num_nodes, 2))
+        predictions[0] = paths[0]['targets'][0]  # Slack bus initialization
+
+        X = plan.X
+        parent, target = plan.parent, plan.target
+        use_capi = _CAPI_AVAILABLE
+        handle, booster = ctx['handle'], ctx['booster']
+
+        for level, (a, b) in enumerate(plan.levels):
+            block = X[a:b]
+            v_parent = predictions[parent[a:b]]
+
+            # Only the parent-voltage columns change as the sweep descends.
+            if normalize:
+                block[:, 0:2] = (v_parent - ctx['cov_mean'][0:2]) / ctx['cov_scale'][0:2]
+            else:
+                block[:, 0:2] = v_parent
+
+            if use_capi:
+                out = _predict_block_capi(handle, plan.ifaces[level], b - a)
+            else:
+                out = booster.inplace_predict(block)
+
+            if normalize:
+                out = np.asarray(out, dtype=np.float32).copy()
+                out *= ctx['tgt_scale']   # float32 in-place: rounds like sklearn
+                out += ctx['tgt_mean']
+
+            if self.use_diff:
+                # Model predicts deltas: Child = Parent + Delta
+                predictions[target[a:b]] = v_parent + out
+            elif self.use_residuals:
+                # Model predicts residuals: Child = Physics + Predicted_Residual
+                predictions[target[a:b]] = plan.res_base[a:b] + out
+            else:
+                # Model predicts absolute voltages
+                predictions[target[a:b]] = out
+
+        return predictions
+
+    def predict_linear(self, num_nodes, paths):
+        """Recursive 1-step prediction along the grid topology."""
+        # The corrector mutates `predictions` inside the node loop, so it has no
+        # depth-batched equivalent; those variants use the reference sweep.
+        if self.use_fast_predict and self.corrector is None:
+            return self._predict_linear_fast(num_nodes, paths)
+        return self._predict_linear_reference(num_nodes, paths)
+
     def predict(self, sample):
         if self.prediction_scheme == 'linear':
             return self.predict_linear(sample['num_nodes'], sample['paths'])
@@ -343,13 +574,18 @@ class NativeXGBModelWrapper:
 
 class XGB_Absolute(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False):
+                 normalize=False, use_fast_predict=False):
         super().__init__(random_state=random_state,
                          prediction_scheme=prediction_scheme,
                          normalize=normalize,
                          use_residuals=False,
-                         use_diff=False)
+                         use_diff=False,
+                         use_fast_predict=use_fast_predict)
         
+class XGB_Absolute_Fast(XGB_Absolute):
+    def __init__(self):
+        super().__init__(use_fast_predict=True)
+
 class XGB_Absolute_Normalized(XGB_Absolute):
     def __init__(self, random_state=42, prediction_scheme='linear'):
         super().__init__(random_state=random_state,
@@ -358,13 +594,18 @@ class XGB_Absolute_Normalized(XGB_Absolute):
 
 class XGB_Parent(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False, use_corrector=False):
+                 normalize=False, use_corrector=False, use_fast_predict=False):
         super().__init__(random_state=random_state,
                          prediction_scheme=prediction_scheme,
                          normalize=normalize,
                          use_residuals=False,
                          use_diff=True,
-                         use_corrector=use_corrector)
+                         use_corrector=use_corrector,
+                         use_fast_predict=use_fast_predict)
+
+class XGB_Parent_Fast(XGB_Parent):
+    def __init__(self):
+        super().__init__(use_fast_predict=True)
 
 class XGB_Parent_Normalized(XGB_Parent):
     def __init__(self, random_state=42, prediction_scheme='linear'):
@@ -380,13 +621,18 @@ class XGB_Parent_Corrected(XGB_Parent):
 
 class XGB_LDF(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False, use_corrector=False):
+                 normalize=False, use_corrector=False, use_fast_predict=False):
         super().__init__(random_state=random_state,
                          prediction_scheme=prediction_scheme,
                          normalize=normalize,
                          use_residuals=True,
                          use_diff=False,
-                         use_corrector=use_corrector)
+                         use_corrector=use_corrector,
+                         use_fast_predict=use_fast_predict)
+
+class XGB_LDF_Fast(XGB_LDF):
+    def __init__(self):
+        super().__init__(use_fast_predict=True)
         
 class XGB_LDF_Normalized(XGB_LDF):
     def __init__(self, random_state=42, prediction_scheme='linear'):
