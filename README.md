@@ -34,13 +34,22 @@ conda activate boost-rpf
   - To generate, run:  
     &emsp; `python scripts/graph_gen.py --size 1800 --grid kerber`  
     Then move the resulting `Kerber_Dorfnetz/` folder under `data/ENGAGE_dataset/`.
-  - This data is used to run Experiment 1 (Known Grids).
+  - This data is used to run Experiment 1 (Fixed Grid).
+- **IEEE European LV feeder data generation**: same workflow, via `scripts/graph_gen.py`.
+  - The feeder is built as a **balanced single-phase equivalent** of pandapower's asymmetric IEEE European LV test feeder, and is then populated with the same DER mix (PV, BESS, EV, heat pumps) as the Kerber grid.
+  - To generate, run:
+    &emsp; `python scripts/graph_gen.py --size 1800 --grid european`
+    Then move the resulting `IEEE_European_LV/` folder under `data/ENGAGE_dataset/`.
+  - The feeder's transformer vector group is set to Dyn5 rather than its nominal Dyn1, so the LV-side voltage angles follow the same convention as the Kerber/SimBench grids.
+  - Expect roughly 2 GB for `dataset_with_ppci.pt` and 1.5 GB for the raw sample JSONs at `--size 1800`.
+  - This data is used to run Experiment 4 (Scalability).
 
 Expected directory structure:
 ```
 data/
 └── ENGAGE_dataset/
     ├── Kerber_Dorfnetz/
+    ├── IEEE_European_LV/
     ├── 1-LV-rural1--1-no_sw/
     ├── 1-LV-rural2--1-no_sw/
     ├── 1-LV-rural3--1-no_sw/
@@ -91,7 +100,7 @@ python run_benchmark.py --data_dir data/ENGAGE_dataset/ --model distflow ldf --s
 ## `scripts/` overview
 
 - `scripts/prepare_data.py`: utility to augment the PyG graph datasets with more grid information from pandapower.
-- `scripts/graph_gen.py`: data-generation utilities for pandapower-based grids, including Kerber.
+- `scripts/graph_gen.py`: data-generation utilities for pandapower-based grids, including Kerber and the IEEE European LV feeder.
 - `scripts/precompute_paths.py`: precomputes sequential path features/targets and saves them for faster loading.
 - `scripts/tune_xgboost.py`: random/grid search for XGBoost-based sequential models (`xgb-absolute`, `xgb-parent`, `xgb-ldf`).
 - `scripts/tune_nns.py`: random/grid search for neural baselines (`arma-gnn`, `global-mlp`).

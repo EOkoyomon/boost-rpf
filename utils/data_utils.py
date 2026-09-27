@@ -21,6 +21,10 @@ from models.lindistflow import calculate_lindistflow_iterative
 
 DATASET_CACHE = {}
 
+# Bumped when the layout of dataset_sequential.pkl changes. Version 2 stores one row
+# per bus plus the radial tree, superseding the slack-to-every-bus path enumeration.
+SEQUENTIAL_FORMAT_VERSION = 2
+
 def get_networkx_graph(data, include_features=False):
     """
     Convert a PyTorch Geometric Data object to a NetworkX graph.
@@ -179,42 +183,43 @@ def get_pyg_graphs(data_dir, grid_type):
     pyg_dataset = transform_dataset(pyg_dataset, add_hops=True, grid_name=grid_type)
     return pyg_dataset
 
-def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=0.0):
+def _extract_nodes_from_sample(data, slack_index=0):
     """
-    Extract all root-to-node paths from a single PyG data sample and compute features.
-    
+    Extract the per-bus sequential learning data from a single PyG data sample.
+
     This function implements the following methodology:
     1. Backward Power Accumulation: Compute P_agg and Q_agg for each node
     2. LinDistFlow Baseline: Compute V_LDF and theta_LDF sequentially
-    3. Graph-to-Path Conversion: Extract paths from slack to every non-slack node
-    
-    Note: V_i and theta_i (parent voltage) are NOT included in covariates.
-    Instead, the model uses lags on the target series to access previous voltage.
-    This ensures clean separation between training (uses true lags) and testing
-    (uses predicted lags via recursive prediction).
-    
+    3. Graph-to-Path Conversion: store the radial tree (parent/depth per bus)
+
+    The sequential models are 1-step Markov: the training row for bus j is built from
+    (parent(j), j) only. Because the grid is radial, every bus has exactly one parent, so
+    one row per bus holds all the information that enumerating every slack-to-bus path
+    does. We therefore store per-bus arrays plus the tree structure, and reproduce that
+    implicit weighting explicitly at training time via `compute_sample_weights`.
+
+    Note: V_i and theta_i (parent voltage) are NOT included in the covariates. The model
+    reads the previous voltage through the parent row instead, which keeps training (true
+    parent voltage) separate from testing (predicted parent voltage).
+
     Args:
         data: PyTorch Geometric Data object with ppci attribute (raw, untransformed)
         slack_index (int): Index of the slack bus (usually 0)
-        slack_vm_pu (float): Deprecated/ignored. The true slack magnitude is read from
-            data.y[slack_index, 2]. Kept for backward-compatible call signatures.
-        slack_va_degree (float): Deprecated/ignored. The true slack (ext_grid) angle is read from
-            data.y[slack_index, 3]; the ~150deg transformer phase shift is applied per-edge inside
-            the LDF sweep, so this must NOT be pre-seeded to -150. Kept for signature compatibility.
 
     Returns:
-        list of dict: Each dict contains:
-            - 'path': list of node indices from slack to target node
-            - 'features': np.array of shape (path_length, 8) with feature vectors
-            - 'targets': np.array of shape (path_length, 2) with [V_j, theta_j]
-            - 'target_node': the final node in the path
+        dict with (N = number of buses):
+            - 'features': np.array (N, 8) [r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
+                where r_ij, x_ij belong to the branch parent(j) -> j (zero at the slack)
+            - 'targets': np.array (N, 2) with the true [V_j, theta_j] (slack row = true slack state)
+            - 'parent': np.array (N,) int32 parent bus index, -1 at the slack
+            - 'depth': np.array (N,) int32 hops from the slack bus
     """
     # 1. Ground truth voltages from y labels
     # y format: [p_mw, q_mvar, vm_pu, va_degree]
     V_true = data.y[:, 2].numpy()  # vm_pu
     theta_true = data.y[:, 3].numpy()  # va_degree
 
-    num_pyg_nodes = len(data.x)
+    num_nodes = len(data.x)
 
     # True slack (ext_grid) state.
     slack_vm_pu = data.y[slack_index, 2].item()
@@ -222,7 +227,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
 
     # 2. Compute the LinDistFlow baseline via the implementation in
     # `models/lindistflow.py` instead of duplicating the sweep here.
-    # `return_internals=True` gives us the intermediate quantities (tree paths, 
+    # `return_internals=True` gives us the intermediate quantities (tree paths,
     # per-edge r/x, aggregated P/Q, LDF V/theta) needed to build the branch
     # features below.
     _, _, internals = calculate_lindistflow_iterative(
@@ -234,6 +239,7 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     )
 
     paths = internals["paths"]
+    parents = internals["parents"]
     edge_r = internals["edge_r"]
     edge_x = internals["edge_x"]
     P_load = internals["P_load"]
@@ -243,73 +249,95 @@ def _extract_paths_from_sample(data, slack_index=0, slack_vm_pu=1.025, slack_va_
     V_LDF = internals["vm_full"]  # LDF voltage magnitude (p.u.), all ppci nodes
     theta_LDF_deg = internals["va_full"]  # LDF voltage angle (degrees), all ppci nodes
 
-    # 3. Extract paths for each non-slack node (up to num_pyg_nodes)
-    path_data_list = []
-    
-    for target_node in range(1, num_pyg_nodes):  # Skip slack (node 0)
-        if target_node not in paths:
-            continue
-            
-        path = paths[target_node]  # [slack, ..., parent, target_node]
-        
-        # Include slack in the sequence so we have a "previous" value for the first child
-        # The sequence is: slack -> child1 -> child2 -> ... -> target_node
-        # Target at step 0 is slack voltage, target at step 1 is child1 voltage, etc.
-        path_length = len(path)
-        
-        # Build feature vectors for each step in the path (including slack)
-        # Feature vector: [r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
-        # Note: V_i, theta_i are NOT included - they come from target lags
-        features = np.zeros((path_length, 8))
-        # features = np.zeros((path_length, 9)) # Added one more feature for node degree
-        targets = np.zeros((path_length, 2))  # [V_j, theta_j]
-        
-        for step_idx, j in enumerate(path):
-            if step_idx == 0:
-                # Slack bus: no branch to it, just its properties
+    # 3. Build one row per bus
+    features = np.zeros((num_nodes, 8))
+    targets = np.zeros((num_nodes, 2))
+    parent = np.full(num_nodes, -1, dtype=np.int32)
+    depth = np.zeros(num_nodes, dtype=np.int32)
+
+    for j in range(num_nodes):
+        if j == slack_index:
+            # Slack bus: no branch leading to it, just its own properties
+            r_ij = 0.0
+            x_ij = 0.0
+        else:
+            if j not in parents:
+                raise ValueError(f'Bus {j} is not connected to the slack bus {slack_index}.')
+            i = parents[j]
+            parent[j] = i
+            depth[j] = len(paths[j]) - 1
+            # Get branch impedance (i -> j)
+            if (i, j) in edge_r:
+                r_ij = edge_r[(i, j)]
+                x_ij = edge_x[(i, j)]
+            elif (j, i) in edge_r:
+                r_ij = edge_r[(j, i)]
+                x_ij = edge_x[(j, i)]
+            else:
                 r_ij = 0.0
                 x_ij = 0.0
-            else:
-                i = path[step_idx - 1]  # Parent node
-                # Get branch impedance (i -> j)
-                if (i, j) in edge_r:
-                    r_ij = edge_r[(i, j)]
-                    x_ij = edge_x[(i, j)]
-                elif (j, i) in edge_r:
-                    r_ij = edge_r[(j, i)]
-                    x_ij = edge_x[(j, i)]
-                else:
-                    r_ij = 0.0
-                    x_ij = 0.0
 
-            # Build feature vector (no parent voltage - that comes from lags)
-            features[step_idx, 0] = r_ij  # Branch resistance
-            features[step_idx, 1] = x_ij  # Branch reactance
-            features[step_idx, 2] = P_load[j]  # Local P injection
-            features[step_idx, 3] = Q_load[j]  # Local Q injection
-            features[step_idx, 4] = P_agg[j]  # Aggregated P
-            features[step_idx, 5] = Q_agg[j]  # Aggregated Q
-            features[step_idx, 6] = V_LDF[j]  # LinDistFlow V estimate
-            features[step_idx, 7] = theta_LDF_deg[j]  # LinDistFlow theta estimate
-            # features[step_idx, 8] = degrees_dict[j]  # Node degree
-            
-            # Target: true voltage at node j
-            if j < num_pyg_nodes:
-                targets[step_idx, 0] = V_true[j]
-                targets[step_idx, 1] = theta_true[j]
-            else:
-                # For extra ppci nodes (shouldn't happen)
-                targets[step_idx, 0] = V_LDF[j]
-                targets[step_idx, 1] = theta_LDF_deg[j]
-        
-        path_data_list.append({
-            'path': path,
-            'features': features,
-            'targets': targets,
-            'target_node': target_node
-        })
-    
-    return path_data_list
+        features[j, 0] = r_ij  # Branch resistance
+        features[j, 1] = x_ij  # Branch reactance
+        features[j, 2] = P_load[j]  # Local P injection
+        features[j, 3] = Q_load[j]  # Local Q injection
+        features[j, 4] = P_agg[j]  # Aggregated P
+        features[j, 5] = Q_agg[j]  # Aggregated Q
+        features[j, 6] = V_LDF[j]  # LinDistFlow V estimate
+        features[j, 7] = theta_LDF_deg[j]  # LinDistFlow theta estimate
+
+        targets[j, 0] = V_true[j]
+        targets[j, 1] = theta_true[j]
+
+    return {
+        'features': features,
+        'targets': targets,
+        'parent': parent,
+        'depth': depth,
+    }
+
+def compute_sample_weights(parent, depth, scheme='subtree'):
+    """
+    Training weights for the per-bus rows, reproducing the weighting that path
+    enumeration applies implicitly through duplicated rows.
+
+    Args:
+        parent (np.array): (N,) parent bus index, -1 at the slack.
+        depth (np.array): (N,) hops from the slack bus.
+        scheme (str): One of
+            - 'subtree': number of buses at or below j. Identical to the number of times
+              slack-to-every-bus paths duplicated the row for j, i.e. this reproduces the
+              original training behavior. Also the number of final predictions that a
+              prediction error at j propagates into.
+            - 'leaves': number of leaves at or below j, i.e. what slack-to-leaf-only paths
+              would have implied.
+            - 'uniform': every branch transition counted once.
+
+    Returns:
+        np.array: (N-1,) weights aligned with buses 1..N-1 (the slack has no row).
+    """
+    num_nodes = len(parent)
+    # Deepest first, so a bus is always visited before its parent.
+    order = np.argsort(depth)[::-1]
+
+    if scheme == 'uniform':
+        weights = np.ones(num_nodes)
+    elif scheme == 'subtree':
+        weights = np.ones(num_nodes)
+        for node in order:
+            if parent[node] >= 0:
+                weights[parent[node]] += weights[node]
+    elif scheme == 'leaves':
+        is_parent = np.zeros(num_nodes, dtype=bool)
+        is_parent[parent[parent >= 0]] = True
+        weights = (~is_parent).astype(float)  # leaves start at 1, internal buses at 0
+        for node in order:
+            if parent[node] >= 0:
+                weights[parent[node]] += weights[node]
+    else:
+        raise ValueError(f"Unknown weight scheme '{scheme}'. Choose from 'subtree', 'leaves', 'uniform'.")
+
+    return weights[1:]  # The slack bus is never a prediction target
 
 def get_tabular_data(data_dir, grid_type):
     graph_dataset = get_pyg_graphs(data_dir, grid_type)
@@ -352,12 +380,14 @@ def get_tabular_data(data_dir, grid_type):
 
 def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=0.0):
     """
-    Load grid data and convert to sequential path format for darts time series training.
-    
-    This function transforms graph-based power flow data into sequences of feature vectors
-    along paths from the slack bus to each node, following the methodology for recursive
-    voltage prediction.
-    
+    Load grid data and convert to the per-bus sequential format used by the XGB models.
+
+    This function transforms graph-based power flow data into one feature/target row per
+    bus, plus the radial tree (parent and depth per bus) that the models walk at training
+    and prediction time. See `_extract_nodes_from_sample` for why one row per bus is
+    sufficient, and `compute_sample_weights` for the weighting that path enumeration uses
+    to apply implicitly.
+
     Args:
         data_dir (str): Base directory where datasets are stored.
         grid_type (str): The type of sb grid (e.g., '1-LV-rural1--1-no_sw', '1-MV-urban--1-no_sw', etc.)
@@ -366,55 +396,46 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=0.0):
         slack_va_degree (float): Deprecated/ignored — the true slack (ext_grid) angle is read
             per-sample from the labels and the transformer phase shift is applied per-edge in the
             LDF sweep. Must not be pre-seeded to -150. Kept for signature compatibility.
-    
+
     Returns:
         list of dict: Each dict represents one network sample and contains:
             - 'grid_type': str, the grid type identifier
             - 'sample_idx': int, index of this sample in the original dataset
-            - 'paths': list of dict, each containing:
-                - 'targets': numpy array with targets [V_j, theta_j]
-                - 'features': numpy array with features (past_covariates)
-                - 'path': list of node indices
-                - 'target_node': int, the final node in the path
-    
-    Feature vector (covariates) for each step j in path:
+            - 'num_nodes': int, number of buses N
+            - 'features': np.array (N, 8), covariates per bus
+            - 'targets': np.array (N, 2), true [V_j, theta_j] per bus
+            - 'parent': np.array (N,), parent bus index (-1 at the slack)
+            - 'depth': np.array (N,), hops from the slack bus
+            - 'true_voltages': np.array (N, 2), ground truth for all buses
+
+    Feature vector (covariates) for each bus j:
         [r_ij, x_ij, P_j, Q_j, P_agg_j, Q_agg_j, V_LDF_j, theta_LDF_j]
-    
-    Note: V_i, theta_i (parent voltage) are NOT in covariates - they come from target lags.
-    
-    Target vector for each step j in path:
+
+    Note: V_i, theta_i (parent voltage) are NOT in the covariates - they are read from the
+    parent's target row.
+
+    Target vector for each bus j:
         [V_j, theta_j]
     """
     # Load raw dataset (without transformation)
     dataset_path = os.path.join(data_dir, grid_type, 'train', 'dataset_with_ppci.pt')
     raw_dataset = torch.load(dataset_path, weights_only=False)
-    
-    # Feature and target column names
-    # Note: V_i, theta_i are NOT included - they come from target lags
-    feature_names = [
-        'r_ij', 'x_ij', 
-        'P_j', 'Q_j', 'P_agg_j', 'Q_agg_j',
-        'V_LDF_j', 'theta_LDF_j'
-    ]
-    target_names = ['V_j', 'theta_j']
-    
+
     # Process each sample in the dataset
     all_samples = []
 
     for sample_idx, data in enumerate(tqdm(raw_dataset, desc=f"Processing {grid_type}", leave=False)):
-        # Extract paths from this sample
-        sample_paths = _extract_paths_from_sample(
-            data, 
-            slack_index=0,
-            slack_vm_pu=slack_vm_pu,
-            slack_va_degree=slack_va_degree
-        )
+        # Extract the per-bus rows and tree structure from this sample
+        sample_nodes = _extract_nodes_from_sample(data, slack_index=0)
 
         all_samples.append({
             'grid_type': grid_type,
             'sample_idx': sample_idx,
             'num_nodes': len(data.x),
-            'paths': sample_paths,
+            'features': sample_nodes['features'],
+            'targets': sample_nodes['targets'],
+            'parent': sample_nodes['parent'],
+            'depth': sample_nodes['depth'],
             'true_voltages': data.y[:, 2:4].numpy(),  # Ground truth for all nodes
         })
 
@@ -423,7 +444,7 @@ def get_grid_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_degree=0.0):
 
 def load_precomputed_paths(data_dir, grid_type):
     """
-    Load pre-computed path data from disk.
+    Load pre-computed per-bus sequential data from disk.
 
     This is much faster than get_grid_paths() because the expensive path extraction
     and feature computation is already done.
@@ -436,11 +457,11 @@ def load_precomputed_paths(data_dir, grid_type):
         list of dict: Same format as get_grid_paths() output.
 
     Raises:
-        FileNotFoundError: If pre-computed data doesn't exist. Run precompute_paths.py first.
+        FileNotFoundError: If pre-computed data doesn't exist, or was written in another
+            path-enumeration format. Run precompute_paths.py first.
     """
     # Load pre-computed data
     precomputed_path = os.path.join(data_dir, grid_type, 'train', 'dataset_sequential.pkl')
-    print(precomputed_path)
 
     if not os.path.exists(precomputed_path):
         raise FileNotFoundError(
@@ -451,36 +472,16 @@ def load_precomputed_paths(data_dir, grid_type):
     with open(precomputed_path, 'rb') as f:
         save_data = pickle.load(f)
 
-    feature_names = save_data['feature_names']
-    target_names = save_data['target_names']
-    samples = save_data['samples']
+    if save_data.get('format_version') != SEQUENTIAL_FORMAT_VERSION:
+        raise FileNotFoundError(
+            f"{precomputed_path} was written in the superseded slack-to-every-bus path format "
+            f"(found format_version={save_data.get('format_version')}, "
+            f"expected {SEQUENTIAL_FORMAT_VERSION}). "
+            f"Run 'python scripts/precompute_paths.py --data_dir {data_dir}' to regenerate it."
+        )
 
-    # Convert numpy arrays to desired format
-    all_samples = []
+    return save_data['samples']
 
-    for sample in tqdm(samples):
-        sample_paths = []
-
-        for path_data in sample['paths']:
-            target_series = path_data['targets']
-            covariate_series = path_data['features']
-
-            sample_paths.append({
-                'targets': target_series,
-                'features': covariate_series,
-                'path': path_data['path'],
-                'target_node': path_data['target_node'],
-            })
-
-        all_samples.append({
-            'grid_type': sample['grid_type'],
-            'sample_idx': sample['sample_idx'],
-            'num_nodes': sample['num_nodes'],
-            'paths': sample_paths,
-            'true_voltages': sample['true_voltages'],
-        })
-
-    return all_samples
 
 def get_dataset(data_dir, grid_types, paths=False, tabular=False):
     """

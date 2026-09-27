@@ -11,7 +11,8 @@
 
 import sys, os
 
-from matplotlib.path import Path
+from pathlib import Path
+
 DATA_GEN_PATH = os.path.abspath('powerdata-gen/')
 sys.path.append(DATA_GEN_PATH)
 import powerdata_gen
@@ -25,7 +26,8 @@ warnings.filterwarnings('ignore', category=FutureWarning)
 import numpy as np
 import pandas as pd
 import pandapower as pp
-from pandapower.networks import create_cigre_network_lv, create_kerber_dorfnetz
+from pandapower.networks import (create_cigre_network_lv, create_kerber_dorfnetz,
+                                 ieee_european_lv_asymmetric)
 from omegaconf import OmegaConf
 import torch
 from torch_geometric.data import Data
@@ -55,7 +57,15 @@ def parse_args():
         "--grid",
         default=["kerber"],
         nargs="+",
-        choices=["cigre", "kerber"],
+        choices=["cigre", "kerber", "european"],
+    )
+    parser.add_argument(
+        # Rejected samples are written to disk by powerdata-gen. A single
+        # IEEE European LV sample is ~0.8 MB, so keeping them costs several GB.
+        "--keep_reject",
+        action="store_true",
+        default=None,
+        help="Keep diverged/rejected samples on disk (default: True, except for the European feeder).",
     )
     args = parser.parse_args()
     return args
@@ -149,11 +159,109 @@ def create_future_kerber_dorfnetz(seed=42):
     return net
 
 
+def create_european_lv_balanced(scenario="on_peak_566", slack_vm_pu=1.0):
+    """IEEE European LV test feeder (907 buses) as a balanced single-phase equivalent.
+
+    pandapower only ships the asymmetric version, so the 55 per-phase loads are
+    collapsed into symmetric loads carrying the total three-phase power.
+
+    `sn_mva`, the slack setpoint, and the trafo vector group (Dyn1 -> Dyn5, i.e. LV
+    angles at ~-150 deg) are aligned with the Kerber/SimBench grids to keep features
+    and targets on the same scale. `scenario` only sets the base loads, which
+    `create_future_european_lv` overwrites.
+    """
+    net = ieee_european_lv_asymmetric(scenario)
+
+    # Balanced equivalent: one symmetric load per asymmetric load, carrying the
+    # summed three-phase power of that load.
+    for _, load in net.asymmetric_load.iterrows():
+        pp.create_load(net,
+                       bus=int(load.bus),
+                       p_mw=float(load.p_a_mw + load.p_b_mw + load.p_c_mw),
+                       q_mvar=float(load.q_a_mvar + load.q_b_mvar + load.q_c_mvar),
+                       name=load["name"],
+                       scaling=float(load.scaling),
+                       in_service=bool(load.in_service))
+    net.asymmetric_load.drop(net.asymmetric_load.index, inplace=True)
+
+    # Drop the (three-phase) result tables that ship with the network, so that
+    # only results of our own power flows are ever stored.
+    for table in [k for k in list(net.keys()) if isinstance(k, str) and k.startswith('res_')]:
+        net[table].drop(net[table].index, inplace=True)
+
+    net.sn_mva = 1.0
+    net.trafo["shift_degree"] = 150.0
+    if slack_vm_pu is not None:
+        net.ext_grid.vm_pu = slack_vm_pu
+
+    return net
+
+
+def create_future_european_lv(seed=42, base_kw=6.0):
+    """DER-rich variant of the IEEE European LV feeder.
+
+    The European feeder loads are ~1 kW each. With base_kw=6 the accepted
+    samples of the generation pipeline stay within roughly 0.91-1.00 pu, so the
+    operating points remain realistic.
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    # 1. Load the base topology (907 buses, 55 load points)
+    net = create_european_lv_balanced()
+
+    # 2. Get list of all load buses (potential connection points)
+    load_buses = net.load.bus.values.tolist()
+    n_households = len(load_buses)
+
+    # 3. Apply heretogenous base loads so not all constant
+    # Same three classes as Kerber - Small (0.6x), Standard (1.0x), Heavy (2.5x) -
+    # applied to a `base_kw` baseline instead of the original ~1 kW loads.
+    for i in net.load.index:
+        size_factor = np.random.choice([0.6, 1.0, 2.5], p=[0.3, 0.5, 0.2])
+        net.load.at[i, "p_mw"] = base_kw * size_factor / 1e3
+        net.load.at[i, "q_mvar"] = 0.0
+        net.load.at[i, "name"] = f"Base_Load_{size_factor*base_kw}kW"
+
+    # 4. Define Penetration Counts
+    n_pv = int(0.40 * n_households)
+    n_ev = int(0.20 * n_households)
+    n_hp = int(0.15 * n_households)
+
+    # 5. Randomly select buses for each technology
+    pv_buses = random.sample(load_buses, n_pv)
+    ev_buses = random.sample(load_buses, n_ev)
+    hp_buses = random.sample(load_buses, n_hp)
+
+    # 6. Add Photovoltaics (sgen)
+    for bus in pv_buses:
+        p_val = random.uniform(0.005, 0.015) # 5-15 kW
+        pp.create_sgen(net, bus, p_mw=p_val, q_mvar=0, type='PV', name=f"PV_at_{bus}")
+
+        # 7. Add Batteries (30% of PV sites)
+        if random.random() < 0.30:
+            pp.create_storage(net, bus, p_mw=0.005, max_e_mwh=0.010, q_mvar=0,
+                              type='Battery', name=f"BESS_at_{bus}")
+
+    # 8. Add Electric Vehicles (sgen with negative P = consumption)
+    for bus in ev_buses:
+        pp.create_sgen(net, bus, p_mw=-0.011, q_mvar=0, type='EV', name=f"EV_at_{bus}")
+
+    # 9. Add Heat Pumps (separate load elements)
+    for bus in hp_buses:
+        p_val = random.uniform(0.003, 0.006) # 3-6 kW
+        pp.create_load(net, bus, p_mw=p_val, q_mvar=0, type='HeatPump', name=f"HP_at_{bus}")
+
+    return net
+
+
 def save_pandapower_grid_to_json(grid_code: str, filename: str):
     if grid_code == 'CIGRE_LV':
         net = get_cigre_network()
     elif grid_code == 'Kerber_Dorfnetz':
         net = create_future_kerber_dorfnetz()
+    elif grid_code == 'IEEE_European_LV':
+        net = create_future_european_lv()
     else:
         raise ValueError(f'Unsupported grid code: {grid_code}')
 
@@ -396,6 +504,35 @@ def get_pyg_data_from_net(net):
                 y=torch.tensor(Y_i, dtype=torch.float32),
                 dc_pf=dc_pf)
 
+### Grid specific generation settings
+
+# The base config randomly disconnects up to 4 lines per sample. That is
+# pointless for a purely radial single feeder like the IEEE European LV grid:
+# dropping any of its 905 lines leaves unsupplied buses, which the sanity filter
+# rejects anyway. Disabling it keeps the accepted samples identical while
+# avoiding ~5x wasted power flows on a 907 bus network.
+GRID_CONFIG_OVERRIDES = {
+    'IEEE_European_LV': {
+        'sampling': {'topology': {'method': 'constant', 'params': {}}},
+        # A single 907 bus sample is ~0.8 MB, so storing every rejected sample
+        # would cost several GB.
+        'keep_reject': False,
+    }
+}
+
+def apply_grid_config_overrides(cfg, grid_code):
+    """Returns a copy of `cfg` with the grid specific overrides applied."""
+    overrides = GRID_CONFIG_OVERRIDES.get(grid_code)
+    if overrides is None:
+        return cfg
+    merged = OmegaConf.merge(cfg, OmegaConf.create(overrides))
+    # OmegaConf.merge is recursive, so the sampling groups that are meant to
+    # replace (rather than extend) the defaults are re-assigned wholesale.
+    for group, value in overrides.get('sampling', {}).items():
+        merged.sampling[group] = OmegaConf.create(value)
+    return merged
+
+
 ### Generate Grids
 
 if __name__ == '__main__':
@@ -413,7 +550,8 @@ if __name__ == '__main__':
     filenames = []
     grid_to_code = {
         'cigre': 'CIGRE_LV',
-        'kerber': 'Kerber_Dorfnetz'
+        'kerber': 'Kerber_Dorfnetz',
+        'european': 'IEEE_European_LV'
     }
     grid_codes = [grid_to_code.get(code, code) for code in args.grid]
     for code in grid_codes:
@@ -440,17 +578,19 @@ if __name__ == '__main__':
         save_path = os.path.join(output_dir, code)
         os.makedirs(save_path, exist_ok=True)
         cfg.default_net_path = f
-        powerdata_gen.build_datasets(cfg.default_net_path,
+        grid_cfg = apply_grid_config_overrides(cfg, code)
+        keep_reject = args.keep_reject if args.keep_reject is not None else grid_cfg.keep_reject
+        powerdata_gen.build_datasets(grid_cfg.default_net_path,
                                      save_path,
                                      log,
-                                     cfg.n_train,
-                                     cfg.n_val,
-                                     cfg.n_test,
-                                     cfg.keep_reject,
-                                     cfg.sampling,
-                                     cfg.powerflow,
-                                     cfg.filtering,
-                                     cfg.seed)
+                                     grid_cfg.n_train,
+                                     grid_cfg.n_val,
+                                     grid_cfg.n_test,
+                                     keep_reject,
+                                     grid_cfg.sampling,
+                                     grid_cfg.powerflow,
+                                     grid_cfg.filtering,
+                                     grid_cfg.seed)
         generated_grid_base_dirs.append(save_path)
 
 
@@ -463,7 +603,7 @@ if __name__ == '__main__':
         generated_grid_files = [os.path.join(generated_grid_dir, f) for f in generated_grids]
 
         dataset_filename = os.path.join(generated_grid_dir,
-                                        f'dataset.pt')
+                                        f'dataset_with_ppci.pt')
         
         dataset_source = os.path.join(generated_grid_dir,
                                         f'dataset_src.csv')
@@ -482,7 +622,9 @@ if __name__ == '__main__':
             data = get_pyg_data_from_net(net)
             if data is None:
                 continue
-            ppci = net["_ppc"]["internal"] # In some cases, may need to run `pp.runpp(net, verbose=False)` right above this.
+            if net.get("_ppc") is None:
+                pp.runpp(net, verbose=False)
+            ppci = net["_ppc"]["internal"]
             data.ppci = ppci
 
             dataset.append(data)

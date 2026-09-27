@@ -20,7 +20,7 @@ from pathlib import Path
 proj_root = Path(__file__).parent.parent
 sys.path.append(str(proj_root))
 
-from utils.data_utils import get_grid_paths
+from utils.data_utils import SEQUENTIAL_FORMAT_VERSION, get_grid_paths
 from utils.training_utils import get_lv_grid_codes
 
 
@@ -30,9 +30,10 @@ def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_d
     Pre-compute path data and save as numpy arrays (without TimeSeries objects).
     
     Saves to: {data_dir}/{grid_type}/train/dataset_sequential.pkl
-    
-    The saved format stores raw numpy arrays which are fast to load.
-    TimeSeries objects are created on-demand when loading.
+
+    The saved format stores raw numpy arrays which are fast to load: one feature/target
+    row per bus plus the radial tree (parent and depth), which the models expand into
+    training rows on the fly.
     """ 
     # Load and prepare all samples
     all_samples = get_grid_paths(data_dir, grid_type, slack_vm_pu, slack_va_degree)
@@ -50,6 +51,7 @@ def precompute_and_save_paths(data_dir, grid_type, slack_vm_pu=1.025, slack_va_d
     
     # Store metadata alongside the data
     save_data = {
+        'format_version': SEQUENTIAL_FORMAT_VERSION,
         'feature_names': feature_names,
         'target_names': target_names,
         'slack_vm_pu': slack_vm_pu,
@@ -76,7 +78,7 @@ def main():
     if args.grids:
         grids = args.grids
     else:
-        grids = ["Kerber_Dorfnetz"] + get_lv_grid_codes(scenario=1)
+        grids = get_lv_grid_codes(scenario=1) + ["Kerber_Dorfnetz", "IEEE_European_LV"]
     
     print(f"Pre-computing paths for {len(grids)} grids...")
     

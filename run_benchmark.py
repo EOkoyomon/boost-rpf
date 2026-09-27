@@ -125,7 +125,7 @@ def parse_args():
     parser.add_argument(
         "--experiment",
         type=int,
-        help="The experiment group to analyze (1, 2, or 3). If not provided, analyzes all experiments together."
+        help="The experiment group to analyze (1, 2, 3, or 4). If not provided, analyzes all experiments together."
     )
     args = parser.parse_args()
     return args
@@ -335,15 +335,16 @@ def run_benchmark(args):
         log_dir = create_log_dir()
     
     # Select experiment cases based on argument
-    selected_experiments = [args.experiment] if args.experiment else [1, 2, 3]
+    selected_experiments = [args.experiment] if args.experiment else [1, 2, 3, 4]
 
     # Only compare LV networks because radial
     test_cases = []
-    test_cases.append((1, ['Kerber_Dorfnetz'], None)) # Experiment 1: Kerber Dorfnetz
+    test_cases.append((1, ['Kerber_Dorfnetz'], None)) # Experiment 1: Fixed Grid (Kerber Dorfnetz)
     grids_to_compare = get_lv_grid_codes(scenario=1)
     test_cases.append((2, grids_to_compare, None))  # Experiment 2: Heterogenous Grids (all grids)
     for grid in grids_to_compare:
         test_cases.append((3, [g for g in grids_to_compare if g != grid], grid))  # Experiment 3: OOD (Leave-one-out scenarios)
+    test_cases.append((4, ['IEEE_European_LV'], None)) # Experiment 4: Scalability (IEEE European LV)
 
     # Filter test cases based on selected experiments
     test_cases = [case for case in test_cases if case[0] in selected_experiments]

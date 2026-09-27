@@ -7,14 +7,14 @@ from sklearn.preprocessing import StandardScaler
 
 
 def get_paths_from_loader(loader):
-    target_series_all = []
-    covariate_series_all = []
-
-    for sample in loader:
-        for path_data in sample['paths']:
-            target_series_all.append(path_data['targets'])
-            covariate_series_all.append(path_data['features'])
-    return target_series_all, covariate_series_all
+    # These darts-based wrappers still expect the superseded slack-to-every-bus path
+    # format. The dataset now stores one row per bus plus the radial tree (see
+    # utils.data_utils._extract_nodes_from_sample); the native wrappers in
+    # models/xgb_models.py are the ported, CLI-selectable ones.
+    raise NotImplementedError(
+        "The darts XGB wrappers were not ported to the per-bus sequential data format. "
+        "Use the native wrappers in models/xgb_models.py (xgb-absolute, xgb-parent, xgb-ldf)."
+    )
 
 class XGBModelWrapper:
     """
@@ -292,6 +292,11 @@ class XGBModelWrapper:
             predictions: np.array of shape (num_nodes, 2) with predicted [V_j, theta_j] for all nodes
         """
         num_nodes = sample['num_nodes']
+        if 'paths' not in sample:
+            raise NotImplementedError(
+                "The darts XGB wrappers were not ported to the per-bus sequential data format. "
+                "Use the native wrappers in models/xgb_models.py (xgb-absolute, xgb-parent, xgb-ldf)."
+            )
         paths = sample['paths']
 
         # Note: Possible inference schemes:

@@ -597,7 +597,7 @@ def plot_error_accumulation(model, loader_test):
     """
 
     sample = loader_test[0]
-    hops_to_slack = {p['target_node']: len(p['path'])-1 for p in sample['paths']} # -1 because path includes the target node itself
+    hops_to_slack = {node: int(sample['depth'][node]) for node in range(1, sample['num_nodes'])} # Skip slack (depth 0)
     max_dist = max(hops_to_slack.values())
     errors_vm = {i: [] for i in range(1, max_dist+1)}
     errors_va = {i: [] for i in range(1, max_dist+1)}

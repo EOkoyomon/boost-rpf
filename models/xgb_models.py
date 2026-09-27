@@ -5,6 +5,8 @@ import numpy as np
 import xgboost as xgb
 from sklearn.preprocessing import StandardScaler
 
+from utils.data_utils import compute_sample_weights
+
 # ---------------------------------------------------------------------------
 # Fast inference path
 #
@@ -77,7 +79,7 @@ def _predict_block_capi(handle, iface, num_rows):
 
 
 class _PathPlan:
-    """Depth-batched layout of one grid's root-to-node paths.
+    """Depth-batched layout of one grid's buses.
 
     Rows are ordered by depth so that each depth level is a contiguous slice of
     a single (num_rows, 18) float32 buffer. The 16 covariate columns do not
@@ -87,31 +89,28 @@ class _PathPlan:
 
     __slots__ = ('num_nodes', 'X', 'parent', 'target', 'res_base', 'levels', 'ifaces')
 
-    def __init__(self, num_nodes, paths, normalize_mean=None, normalize_scale=None):
-        items = sorted(
-            ((len(p['path']) - 1, p) for p in paths if len(p['path']) > 1),
-            key=lambda t: t[0],
-        )
-        n = len(items)
+    def __init__(self, sample, normalize_mean=None, normalize_scale=None):
+        features = sample['features']
+        bus_depth = sample['depth']
+        num_nodes = sample['num_nodes']
+
+        # Buses 1..N-1 sorted by depth; ties keep ascending bus order.
+        target = np.argsort(bus_depth[1:], kind='stable') + 1
+        n = len(target)
+        parent = np.asarray(sample['parent'], dtype=np.intp)[target]
+
         self.num_nodes = num_nodes
         # float64 throughout, so the bytes handed to XGBoost are the same ones
         # the per-node sweep builds. XGBoost casts to float32 internally, and a
         # float64 block benchmarks identically, so this costs nothing.
         self.X = np.zeros((n, 18))
-        self.parent = np.empty(n, dtype=np.intp)
-        self.target = np.empty(n, dtype=np.intp)
-        self.res_base = np.empty((n, 2))
-        depths = np.empty(n, dtype=np.intp)
+        self.parent = parent
+        self.target = target.astype(np.intp)
+        self.res_base = features[target][:, 6:8].copy()
 
         covariates = self.X[:, 2:18]  # filled in place
-        for i, (depth, path_info) in enumerate(items):
-            features = path_info['features']
-            covariates[i, 0:8] = features[-2]
-            covariates[i, 8:16] = features[-1]
-            self.res_base[i] = features[-1][6:8]
-            self.parent[i] = path_info['path'][-2]
-            self.target[i] = path_info['target_node']
-            depths[i] = depth
+        covariates[:, 0:8] = features[parent]
+        covariates[:, 8:16] = features[target]
 
         if normalize_mean is not None:
             # StandardScaler.transform is elementwise, so the static columns can
@@ -122,6 +121,7 @@ class _PathPlan:
         if n == 0:
             self.levels = []
         else:
+            depths = np.asarray(bus_depth, dtype=np.intp)[target]
             bounds = np.concatenate([[0], np.flatnonzero(np.diff(depths)) + 1, [n]])
             self.levels = [(int(bounds[k]), int(bounds[k + 1])) for k in range(len(bounds) - 1)]
 
@@ -132,15 +132,31 @@ class _PathPlan:
         )
 
 
-def get_paths_from_loader(loader):
-    target_series_all = []
-    covariate_series_all = []
+def path_row_order(parent, depth):
+    """Row indices that reproduce the slack-to-every-bus path data.
 
-    for sample in loader:
-        for path_data in sample['paths']:
-            target_series_all.append(path_data['targets'])
-            covariate_series_all.append(path_data['features'])
-    return target_series_all, covariate_series_all
+    The old format emitted one row per step of every slack-to-bus path.
+    Every such row is a copy of a per-bus row (bus j maps to row j-1 of
+    the per-bus matrix), so replaying that order reproduces the old training
+    matrix exactly (same rows, same multiplicities, same sequence).
+    The order matters because `subsample` draws rows in data order, so
+    weighting or regrouping the duplicates changes the trees that get built.
+
+    Returns:
+        np.array: (sum of bus depths,) indices into the per-bus rows.
+    """
+    num_nodes = len(parent)
+    chains = [None] * num_nodes
+    chains[0] = []  # the slack contributes no row
+    # Shallowest first, so a bus's parent chain is always built before its own.
+    for node in np.argsort(depth, kind='stable'):
+        if node != 0:
+            chains[node] = chains[parent[node]] + [node - 1]
+
+    order = []
+    for target_node in range(1, num_nodes):
+        order.extend(chains[target_node])
+    return np.asarray(order, dtype=np.int64)
 
 class BiasCorrector:
     def __init__(self):
@@ -257,13 +273,12 @@ class BiasCorrector:
 class NativeXGBModelWrapper:
     def __init__(self, random_state=42, prediction_scheme='linear',
                  normalize=False, use_residuals=False, use_diff=True, use_corrector=False,
-                 use_fast_predict=True, predict_nthread=1):
+                 use_fast_predict=True, predict_nthread=1,
+                 weight_scheme='subtree', expand_weights=False):
         self.random_state = random_state
         self.prediction_scheme = prediction_scheme
         self.normalize = normalize
-        # Depth-batched inference. Set use_fast_predict=False to fall back to
-        # the original node-at-a-time sweep (kept for comparison; the two agree
-        # bit for bit).
+        # Depth-batched inference.
         self.use_fast_predict = use_fast_predict
         # Tiny per-level batches do not amortize OpenMP fan-out: single-threaded
         # prediction is ~2x faster than the default here.
@@ -272,6 +287,12 @@ class NativeXGBModelWrapper:
         assert not (use_residuals and use_diff), "Cannot use both residuals and differencing."
         self.use_residuals = use_residuals
         self.use_diff = use_diff
+        # How much each branch transition counts during fitting.
+        self.weight_scheme = weight_scheme
+        # Legacy mode: duplicate the rows instead of weighting them.
+        assert not (use_corrector and expand_weights), \
+            "The bias corrector indexes one row per bus, so it cannot be combined with expand_weights."
+        self.expand_weights = expand_weights
 
         # Native XGBRegressor with multi-output support
         self.model = xgb.XGBRegressor(
@@ -300,77 +321,92 @@ class NativeXGBModelWrapper:
         # Defaults for models pickled before the fast predict path was added.
         state.setdefault('use_fast_predict', True)
         state.setdefault('predict_nthread', 1)
+        state.setdefault('weight_scheme', 'subtree')
+        state.setdefault('expand_weights', False)
         self.__dict__.update(state)
         self._fast_ctx = None
 
-    def _create_tabular_data(self, target_series_list, covariate_series_list):
+    def _create_tabular_data(self, samples):
         """
-        Creates tabular dataset.
-        X = [Target_lag_1, ..., Target_lag_n, Covariate_t]
-        y = [Target_t] OR [Delta_t]
+        Creates the tabular dataset: one row per bus (excluding the slack).
+
+        X = [V_parent, theta_parent, Covariates_parent, Covariates_j]
+        y = [V_j, theta_j] OR [Delta_j] OR [Residual_j]
+        w = weight of bus j under self.weight_scheme
 
         Args:
-            target_series_list: List of np.arrays of shape (T, 2) with target voltages
-            covariate_series_list: List of np.arrays of shape (T, 8) with covariates
+            samples: List of sample dicts from get_grid_paths / load_precomputed_paths
         """
-        X_all, y_all = [], []
-        
-        for target, cov in zip(target_series_list, covariate_series_list):
-            # 1. Differencing (Optional)
-            if self.use_diff:
-                # Pad with 0s at the start to keep length same as original series
-                # This ensures path length 2 (Slack -> Node 1) is preserved.
-                target_to_use = np.diff(target, axis=0, prepend=target[0:1])
-            elif self.use_residuals:
-                target_to_use = target - cov[:, 6:8]
-            else:
-                target_to_use = target
+        X_all, y_all, w_all = [], [], []
 
-            # 2. Windowing / Lagging
-            # We start from index 1 because index 0 is the Slack Bus (Input/History)
-            for t in range(1, len(target)):
-                # The 'lag' is the absolute voltage of the parent node (t-1)
-                # This is true REGARDLESS of whether we predict absolute, diff, or residuals.
-                parent_val = target[t-1]
-                parent_cov = cov[t-1]
-                current_cov = cov[t]
-                # current_cov[6:8] = 0.0  # Zero out physics approx
-                
-                X_all.append(np.concatenate([parent_val.flatten(), parent_cov.flatten(), current_cov.flatten()]))
-                y_all.append(target_to_use[t])
-                
-        return np.array(X_all), np.array(y_all)
+        for sample in samples:
+            features = sample['features']
+            targets = sample['targets']
+            parent = sample['parent']
+
+            # Buses 1..N-1 are the prediction targets; parent[1:] indexes their parents.
+            p = parent[1:]
+
+            # The 'lag' is the absolute voltage of the parent bus. This is true REGARDLESS
+            # of whether we predict absolute, diff, or residuals.
+            X_all.append(np.hstack([targets[p], features[p], features[1:]]))
+
+            if self.use_diff:
+                y_all.append(targets[1:] - targets[p])
+            elif self.use_residuals:
+                y_all.append(targets[1:] - features[1:, 6:8]) # Residual from physics baseline
+            else:
+                y_all.append(targets[1:])
+
+            if self.expand_weights:
+                # Legacy fitting: materialize the duplicated rows in the original path
+                # order instead of weighting the unique rows.
+                idx = path_row_order(parent, sample['depth'])
+                X_all[-1] = X_all[-1][idx]
+                y_all[-1] = y_all[-1][idx]
+                w_all.append(np.ones(len(idx)))
+            else:
+                w_all.append(compute_sample_weights(parent, sample['depth'], self.weight_scheme))
+
+        return np.vstack(X_all), np.vstack(y_all), np.concatenate(w_all)
 
     def fit(self, loader_train, loader_val, verbose=False):
         """
-        Fit the model on a list of path sequences.
+        Fit the model on a list of per-bus network samples.
 
         Args:
             loader_train: DataLoader for training data
             loader_val: DataLoader for validation data
             verbose: Whether to print progress
         """
-        target_series_train, covariate_series_train = get_paths_from_loader(loader_train)
-        target_series_val, covariate_series_val = get_paths_from_loader(loader_val)
+        # 1. Create tabular data (one row per bus, weighted by self.weight_scheme)
+        X_train, y_train, w_train = self._create_tabular_data(loader_train)
+        X_val, y_val, w_val = self._create_tabular_data(loader_val)
 
-        print(f"Collected {len(target_series_train)} training paths", flush=True)
-        print(f"Collected {len(target_series_val)} validation paths", flush=True)
+        if self.expand_weights:
+            # The duplication already carries the weighting, so the rows stay unweighted.
+            w_train = w_val = None
 
-        # 1. Create tabular data
-        X_train, y_train = self._create_tabular_data(target_series_train, covariate_series_train)
-        X_val, y_val = self._create_tabular_data(target_series_val, covariate_series_val)
+        print(f"Collected {len(X_train)} training rows from {len(loader_train)} networks", flush=True)
+        print(f"Collected {len(X_val)} validation rows from {len(loader_val)} networks", flush=True)
 
-        # 2. Normalization
+        # 2. Normalization (weighted, to match the weighting used for fitting)
         if self.normalize:
-            self.covariate_scaler.fit(X_train)
+            self.covariate_scaler.fit(X_train, sample_weight=w_train)
             X_train = self.covariate_scaler.transform(X_train)
             X_val = self.covariate_scaler.transform(X_val)
-            self.target_scaler.fit(y_train)
+            self.target_scaler.fit(y_train, sample_weight=w_train)
             y_train = self.target_scaler.transform(y_train)
             y_val = self.target_scaler.transform(y_val)
 
-        # 3. Fit the model
-        self.model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=verbose)
+        # 3. Fit the model. The validation weights keep get_validation_error on the same
+        # scale as the training objective (in expanded mode the duplication carries it).
+        weight_kwargs = {} if w_train is None else {'sample_weight': w_train,
+                                                    'sample_weight_eval_set': [w_val]}
+        self.model.fit(X_train, y_train,
+                       eval_set=[(X_val, y_val)],
+                       verbose=verbose,
+                       **weight_kwargs)
 
         # 4. Train the bias corrector
         if self.corrector is not None:
@@ -419,43 +455,47 @@ class NativeXGBModelWrapper:
         
         return pred.flatten()
 
-    def _predict_linear_reference(self, num_nodes, paths):
+    def _predict_linear_reference(self, sample):
         """Recursive 1-step prediction along the grid topology, one node per call.
 
         Reference implementation. `_predict_linear_fast` is equivalent and much
         faster; this is kept so the two can be diffed.
         """
-        sorted_paths = sorted(paths, key=lambda p: len(p['path']))
-        predictions = np.zeros((num_nodes, 2))
-        
-        # Slack Bus initialization
-        slack_val = paths[0]['targets'][0]
-        predictions[0] = slack_val
-        X_all = [None]*num_nodes
+        features = sample['features']
+        targets = sample['targets']
+        parent = sample['parent']
+        num_nodes = sample['num_nodes']
 
-        for path_info in sorted_paths:
-            path = path_info['path']
-            if len(path) <= 1: continue
-            
-            target_node = path_info['target_node']
-            parent_node = path[-2]
-            
+        predictions = np.zeros((num_nodes, 2))
+
+        # Slack Bus initialization
+        predictions[0] = targets[0]
+
+        # Walking the buses in order of increasing depth guarantees that a bus's parent has
+        # already been predicted by the time we reach it.
+        order = np.argsort(sample['depth'], kind='stable')
+
+        for target_node in order:
+            if target_node == 0:
+                continue
+
+            parent_node = parent[target_node]
+
             # 1. Get Parent Voltage (Target Lag)
             v_parent = predictions[parent_node]
             # 2. Get Branch Covariates
-            cov_parent = path_info['features'][-2]  # Covariates of the parent node/edge
-            cov_target = path_info['features'][-1] # Features of the current node/edge
-            
+            cov_parent = features[parent_node]  # Covariates of the parent node/edge
+            cov_target = features[target_node]  # Features of the current node/edge
+
             X = np.concatenate([v_parent.flatten(), cov_parent.flatten(), cov_target.flatten()])
             out = self._predict_step(X.reshape(1, -1))
-            X_all[target_node] = X
 
             # 5. Apply bias correction
             if self.corrector is not None:
                 bias = self.corrector.predict(X.reshape(1, -1), out.reshape(1, -1))  # Exclude slack node
                 # print(f"Applying Bias Correction: {bias}", flush=True)
                 predictions[1:] += bias
-            
+
             # Final prediction
             if self.use_diff:
                 # If model predicts deltas: Child = Parent + Delta
@@ -466,12 +506,6 @@ class NativeXGBModelWrapper:
             else:
                 # If model predicts absolute: Child = Predicted_Absolute
                 predictions[target_node] = out
-
-        # 5. Apply bias correction
-        # if self.corrector is not None:
-        #     bias = self.corrector.predict(np.array(X_all[1:]), predictions[1:])  # Exclude slack node
-        #     print(f"Applying Bias Correction: {bias}", flush=True)
-        #     predictions[1:] += bias
 
         return predictions
 
@@ -490,7 +524,7 @@ class NativeXGBModelWrapper:
             self._fast_ctx = ctx
         return self._fast_ctx
 
-    def _predict_linear_fast(self, num_nodes, paths):
+    def _predict_linear_fast(self, sample):
         """Depth-batched equivalent of `_predict_linear_reference`.
 
         One XGBoost call per depth level instead of one per node. Produces
@@ -499,14 +533,14 @@ class NativeXGBModelWrapper:
         ctx = self._get_fast_ctx()
         normalize = self.normalize
         plan = _PathPlan(
-            num_nodes,
-            paths,
+            sample,
             normalize_mean=ctx['cov_mean'] if normalize else None,
             normalize_scale=ctx['cov_scale'] if normalize else None,
         )
 
+        num_nodes = sample['num_nodes']
         predictions = np.zeros((num_nodes, 2))
-        predictions[0] = paths[0]['targets'][0]  # Slack bus initialization
+        predictions[0] = sample['targets'][0]  # Slack bus initialization
 
         X = plan.X
         parent, target = plan.parent, plan.target
@@ -545,17 +579,17 @@ class NativeXGBModelWrapper:
 
         return predictions
 
-    def predict_linear(self, num_nodes, paths):
+    def predict_linear(self, sample):
         """Recursive 1-step prediction along the grid topology."""
         # The corrector mutates `predictions` inside the node loop, so it has no
         # depth-batched equivalent; those variants use the reference sweep.
         if self.use_fast_predict and self.corrector is None:
-            return self._predict_linear_fast(num_nodes, paths)
-        return self._predict_linear_reference(num_nodes, paths)
+            return self._predict_linear_fast(sample)
+        return self._predict_linear_reference(sample)
 
     def predict(self, sample):
         if self.prediction_scheme == 'linear':
-            return self.predict_linear(sample['num_nodes'], sample['paths'])
+            return self.predict_linear(sample)
         # Only using the linear method going forward for NativeXGBModelWrapper.
         raise NotImplementedError(f"Scheme {self.prediction_scheme} not implemented.")
     
@@ -574,13 +608,14 @@ class NativeXGBModelWrapper:
 
 class XGB_Absolute(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False, use_fast_predict=False):
+                 normalize=False, use_fast_predict=False, expand_weights=False):
         super().__init__(random_state=random_state,
                          prediction_scheme=prediction_scheme,
                          normalize=normalize,
                          use_residuals=False,
                          use_diff=False,
-                         use_fast_predict=use_fast_predict)
+                         use_fast_predict=use_fast_predict,
+                         expand_weights=expand_weights)
         
 class XGB_Absolute_Fast(XGB_Absolute):
     def __init__(self):
@@ -594,14 +629,15 @@ class XGB_Absolute_Normalized(XGB_Absolute):
 
 class XGB_Parent(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False, use_corrector=False, use_fast_predict=False):
+                 normalize=False, use_corrector=False, use_fast_predict=False, expand_weights=False):
         super().__init__(random_state=random_state,
                          prediction_scheme=prediction_scheme,
                          normalize=normalize,
                          use_residuals=False,
                          use_diff=True,
                          use_corrector=use_corrector,
-                         use_fast_predict=use_fast_predict)
+                         use_fast_predict=use_fast_predict,
+                         expand_weights=expand_weights)
 
 class XGB_Parent_Fast(XGB_Parent):
     def __init__(self):
@@ -621,14 +657,15 @@ class XGB_Parent_Corrected(XGB_Parent):
 
 class XGB_LDF(NativeXGBModelWrapper):
     def __init__(self, random_state=42, prediction_scheme='linear',
-                 normalize=False, use_corrector=False, use_fast_predict=False):
+                 normalize=False, use_corrector=False, use_fast_predict=False, expand_weights=False):
         super().__init__(random_state=random_state,
                          prediction_scheme=prediction_scheme,
                          normalize=normalize,
                          use_residuals=True,
                          use_diff=False,
                          use_corrector=use_corrector,
-                         use_fast_predict=use_fast_predict)
+                         use_fast_predict=use_fast_predict,
+                         expand_weights=expand_weights)
 
 class XGB_LDF_Fast(XGB_LDF):
     def __init__(self):
