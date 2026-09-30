@@ -4,36 +4,258 @@ import networkx as nx
 import numpy as np
 import torch
 import torch.nn as nn
-from scipy.sparse import find
+from scipy.sparse import csr_matrix, find
+from scipy.sparse.csgraph import dijkstra
 
 
-class LinDistFlow(nn.Module):
-    def __init__(self):
+class _DistFlowModule(nn.Module):
+    """Shared plumbing for the (Lin)DistFlow sweeps.
+
+    Args:
+        use_fast (bool): Use the vectorized sweep (`calculate_distflow_fast`). The
+            node-at-a-time version is kept as a reference; the two agree to machine
+            precision.
+        cache_topology (bool): Reuse the extracted radial tree across samples of the
+            same grid. The topology is a property of the network, not of the loading,
+            so this is exact, but it moves topology extraction out of the measured
+            per-sample path, so it is off by default to keep inference timings
+            comparable to the other models.
+    """
+
+    def __init__(self, linear, use_fast=True, cache_topology=False):
         super().__init__()
+        self.linear = linear
+        self.use_fast = use_fast
+        self.cache_topology = cache_topology
+        self._topo_cache = {}
 
     def is_analytical(self):
         return True
 
     def forward(self, data):
-        vm_predictions, va_predictions = calculate_lindistflow_iterative(
-            data, slack_index=0, slack_vm_pu=data.slack_info[0], slack_va_degree=data.slack_info[1]
+        # `data.slack_info` is a float32 tensor, and letting it into the recursion
+        # makes numpy promote every step to a float32 torch scalar. This costs
+        # a few ms in torch dispatch and silently computes the whole angle sweep
+        # in single precision, adding a small amount of error.
+        slack_vm_pu = float(data.slack_info[0])
+        slack_va_degree = float(data.slack_info[1])
+
+        if self.use_fast:
+            topology = None
+            key = getattr(data, 'grid_name', None)
+            if self.cache_topology and key is not None:
+                topology = self._topo_cache.get(key)
+            vm, va, topology = calculate_distflow_fast(
+                data, slack_index=0, slack_vm_pu=slack_vm_pu,
+                slack_va_degree=slack_va_degree, linear=self.linear, topology=topology,
+            )
+            if self.cache_topology and key is not None:
+                self._topo_cache[key] = topology
+        else:
+            vm, va = calculate_distflow_iterative(
+                data, slack_index=0, slack_vm_pu=slack_vm_pu,
+                slack_va_degree=slack_va_degree, linear=self.linear,
+            )
+
+        return torch.stack([torch.from_numpy(vm), torch.from_numpy(va)], dim=1)
+
+
+class LinDistFlow(_DistFlowModule):
+    def __init__(self, use_fast=True, cache_topology=False):
+        super().__init__(linear=True, use_fast=use_fast, cache_topology=cache_topology)
+
+
+class DistFlow(_DistFlowModule):
+    def __init__(self, use_fast=True, cache_topology=False):
+        super().__init__(linear=False, use_fast=use_fast, cache_topology=cache_topology)
+
+# ---------------------------------------------------------------------------
+# Vectorized forward-backward sweep
+#
+# The vectorized version below replaces the slow node-at-a-time sweep with:
+#   1. Array topology extraction. Branch r/x/tap/shift are derived from Ybus with
+#      whole-array operations, and the radial tree comes from a single C-level
+#      BFS (`scipy.sparse.csgraph.dijkstra`, unweighted) that returns depths and
+#      predecessors at once, in place of networkx.
+#   2. Depth-batched sweeps. Both sweeps are sequential only in hop distance from
+#      the slack bus, so each depth level is processed as one vectorized step:
+#      D array operations instead of N scalar iterations.
+# ---------------------------------------------------------------------------
+
+def _build_distflow_topology(data, slack_index=0):
+    """Extract the radial tree and per-branch impedances as flat arrays.
+
+    Depends only on the network (Ybus, edge_index), not on the loading, so the
+    result can be reused across samples of the same grid.
+
+    Returns a dict with, indexed by child bus: `parent`, `r`, `x`, `tap_sq`,
+    `shift_rad`; plus `levels` (bus indices grouped by depth, shallowest first)
+    and `parents_by_level`.
+    """
+    Ybus = data.ppci["Ybus"]
+    num_nodes = data.ppci["Sbus"].shape[0]
+
+    rows, cols, vals = find(Ybus)
+    off_diagonal = rows != cols
+    rows, cols, vals = rows[off_diagonal], cols[off_diagonal], vals[off_diagonal]
+
+    # Keep only the Ybus off-diagonals that correspond to a real branch, and pick
+    # up each one's trafo flag, via a sorted-key lookup instead of a dict.
+    edge_index = data.edge_index.numpy()
+    edge_attr = data.edge_attr.numpy()
+    edge_keys = edge_index[0].astype(np.int64) * num_nodes + edge_index[1].astype(np.int64)
+    order = np.argsort(edge_keys, kind='stable')
+    edge_keys_sorted = edge_keys[order]
+    is_trafo_sorted = edge_attr[order, 0].astype(bool)
+
+    ybus_keys = rows.astype(np.int64) * num_nodes + cols.astype(np.int64)
+    pos = np.clip(np.searchsorted(edge_keys_sorted, ybus_keys), 0, max(len(edge_keys_sorted) - 1, 0))
+    keep = edge_keys_sorted[pos] == ybus_keys
+
+    src, dst, y_ij = rows[keep], cols[keep], vals[keep]
+    is_trafo = is_trafo_sorted[pos[keep]]
+
+    # Same impedance recovery as the reference sweep (see the transformer note
+    # below), applied to whole arrays. For a plain line z = -1/Y_ij; for a
+    # transformer edge (src side carrying the tap) t = -Y_ij/Y_ss and
+    # z = 1/(Y_ss |t|^2).
+    diag = Ybus.diagonal()
+    tap_ratio = np.ones(len(src))
+    shift_deg = np.zeros(len(src))
+    z = np.empty(len(src), dtype=np.complex128)
+
+    line = ~is_trafo
+    z[line] = -1.0 / y_ij[line]
+    if is_trafo.any():
+        t = -y_ij[is_trafo] / diag[src[is_trafo]]
+        tap_ratio[is_trafo] = np.abs(t)
+        shift_deg[is_trafo] = np.degrees(np.angle(t))
+        z[is_trafo] = 1.0 / (diag[src[is_trafo]] * tap_ratio[is_trafo] ** 2)
+
+    # Radial tree rooted at the slack bus: one C-level unweighted BFS gives both
+    # the depth and the parent of every bus.
+    adjacency = csr_matrix((np.ones(len(src)), (src, dst)), shape=(num_nodes, num_nodes))
+    distance, predecessor = dijkstra(adjacency, directed=False, indices=slack_index,
+                                    unweighted=True, return_predecessors=True)
+    reachable = np.isfinite(distance)
+    depth = np.full(num_nodes, -1, dtype=np.int64)
+    depth[reachable] = distance[reachable].astype(np.int64)
+    parent = predecessor.astype(np.int64)
+
+    # Per-child branch attributes: the edge (parent[j] -> j).
+    child = np.flatnonzero(reachable & (np.arange(num_nodes) != slack_index))
+    kept_keys = src.astype(np.int64) * num_nodes + dst.astype(np.int64)
+    key_order = np.argsort(kept_keys, kind='stable')
+    tree_edge = key_order[np.searchsorted(kept_keys[key_order],
+                                         parent[child] * num_nodes + child)]
+
+    r = np.zeros(num_nodes)
+    x = np.zeros(num_nodes)
+    tap_sq = np.ones(num_nodes)
+    shift_rad = np.zeros(num_nodes)
+    r[child] = z.real[tree_edge]
+    x[child] = z.imag[tree_edge]
+    tap_sq[child] = tap_ratio[tree_edge] ** 2
+    shift_rad[child] = np.deg2rad(shift_deg[tree_edge])
+
+    # Group buses by depth so each level is one vectorized step.
+    by_depth = child[np.argsort(depth[child], kind='stable')]
+    level_depths = depth[by_depth]
+    bounds = np.concatenate([[0], np.flatnonzero(np.diff(level_depths)) + 1, [len(by_depth)]])
+    levels = [by_depth[bounds[k]:bounds[k + 1]] for k in range(len(bounds) - 1)]
+
+    return {
+        "num_nodes": num_nodes,
+        "parent": parent,
+        "r": r,
+        "x": x,
+        "tap_sq": tap_sq,
+        "shift_rad": shift_rad,
+        "levels": levels,
+        "parents_by_level": [parent[level] for level in levels],
+    }
+
+
+def calculate_distflow_fast(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=0.0,
+                            linear=True, topology=None):
+    """Vectorized equivalent of `calculate_distflow_iterative`.
+
+    Args:
+        topology: Optional pre-built topology from `_build_distflow_topology`. Pass
+            one to reuse the tree across samples of the same grid; omit to rebuild
+            it (the default, so the cost stays inside the measured call).
+
+    Returns:
+        np.array: Predicted Voltage Magnitudes (p.u.)
+        np.array: Predicted Voltage Angles (degrees)
+        dict: the topology used, so callers can cache it.
+    """
+    if topology is None:
+        topology = _build_distflow_topology(data, slack_index)
+
+    num_nodes = topology["num_nodes"]
+    parent = topology["parent"]
+    r, x = topology["r"], topology["x"]
+    levels, parents_by_level = topology["levels"], topology["parents_by_level"]
+
+    # ppci Sbus is Net Injection; we need Net Load.
+    Sbus = -data.ppci["Sbus"]
+    P_load, Q_load = Sbus.real, Sbus.imag
+
+    slack_vm_pu = float(slack_vm_pu)
+    slack_va_degree = float(slack_va_degree)
+
+    # Same transformed-schema sanity check as the reference sweep, vectorized.
+    # (One-sided, as in the original -- it checks difference < 1e-6, not |difference|.)
+    num_x = len(data.x)
+    x_np = data.x.numpy()
+    assert np.all((x_np[1:, 0] - P_load[1:num_x]) < 1e-6)
+    assert np.all((x_np[1:, 1] - Q_load[1:num_x]) < 1e-6)
+
+    ## Backward Sweep (Summing Power), deepest level first
+    P_flow = P_load.copy()
+    Q_flow = Q_load.copy()
+    for level, level_parents in zip(reversed(levels), reversed(parents_by_level)):
+        p_node = P_flow[level]
+        q_node = Q_flow[level]
+        if not linear:
+            # As in the reference: the loss term is added to what flows up to the
+            # parent, but P_flow/Q_flow at this bus stay loss-free.
+            loss = p_node ** 2 + q_node ** 2
+            p_node = p_node + r[level] * loss
+            q_node = q_node + x[level] * loss
+        # bincount, not `+=`, so siblings sharing a parent all accumulate.
+        P_flow += np.bincount(level_parents, weights=p_node, minlength=num_nodes)
+        Q_flow += np.bincount(level_parents, weights=q_node, minlength=num_nodes)
+
+    ## Forward Sweep (Calculating Voltage), shallowest level first
+    V_sq = np.full(num_nodes, slack_vm_pu ** 2)
+    Va_rad = np.full(num_nodes, np.deg2rad(slack_va_degree))
+    for level, level_parents in zip(levels, parents_by_level):
+        p_line = P_flow[level]
+        q_line = Q_flow[level]
+
+        V_sq_before_tap = V_sq[level_parents] - 2.0 * (r[level] * p_line + x[level] * q_line)
+        if not linear:
+            V_sq_before_tap = V_sq_before_tap + (
+                (r[level] ** 2 + x[level] ** 2) * (p_line ** 2 + q_line ** 2) / V_sq[level_parents]
+            )
+        V_sq[level] = V_sq_before_tap / topology["tap_sq"][level]
+
+        Va_rad[level] = (
+            Va_rad[level_parents]
+            - topology["shift_rad"][level]
+            - (x[level] * p_line - r[level] * q_line) / slack_vm_pu
         )
-        out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
-        return out
 
-class DistFlow(nn.Module):
-    def __init__(self):
-        super().__init__()
+    vm_full = np.sqrt(np.maximum(V_sq, 0))
+    va_full = np.rad2deg(Va_rad)
 
-    def is_analytical(self):
-        return True
+    return vm_full[:num_x], va_full[:num_x], topology
 
-    def forward(self, data):
-        vm_predictions, va_predictions = calculate_distflow_iterative(
-            data, slack_index=0, slack_vm_pu=data.slack_info[0], slack_va_degree=data.slack_info[1], linear=False
-        )
-        out = torch.stack([torch.tensor(vm_predictions), torch.tensor(va_predictions)], dim=1)
-        return out
+# ---------------------------------------------------------------------------
+# Iterative forward-backward sweep
+# ---------------------------------------------------------------------------
 
 def calculate_lindistflow_iterative(data, slack_index=0, slack_vm_pu=1.025, slack_va_degree=0.0, return_internals=False):
     """

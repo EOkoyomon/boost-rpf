@@ -4,6 +4,7 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
+from make_tables import format_model_name
 
 def plot_inference_time_scaling(df_all, grid_to_num_noodes, save=False):
     # For every model in the dataframe, plot inference time vs number of nodes as a line plot
@@ -23,20 +24,18 @@ def plot_inference_time_scaling(df_all, grid_to_num_noodes, save=False):
                     inference_time = df_model[df_model['testing_grid'] == grid]['inference_time_ms'].values.mean()
                     x.append(num_nodes)
                     y.append(inference_time)
-        model_label = model.replace('_', '-')
+        model_label = format_model_name(model)
         plt.plot(x, y, label=model_label, marker='o', linestyle='-')
     plt.xlabel('Number of Nodes', fontsize=22)
     plt.ylabel('Inference Time (ms)', fontsize=22)
-    # Add a little padding to the title
-    plt.title('Inference Time Scaling', fontsize=24, pad=20)
-    plt.legend(fontsize=18)
+    plt.legend(fontsize=12, loc='lower center', bbox_to_anchor=(0.5, 1.02), ncol=3)
     plt.xticks(fontsize=20)
     plt.yticks(fontsize=20)
     # Save high resolution vector figure (pdf)
     if save:
         FIGURES_DIR.mkdir(exist_ok=True)
         path = FIGURES_DIR / "inference_time_scaling.pdf"
-        plt.savefig(path, format="pdf", dpi=300)
+        plt.savefig(path, format="pdf", dpi=300, bbox_inches="tight")
     else:
         plt.show()
 
@@ -44,7 +43,7 @@ def plot_vm_boxplot(df_all, metric, save=False):
 
     # 1. Filter and prepare data
     df_ood = df_all[df_all['experiment'] == 3].copy() # Only OOD (Leave-one-out) scenarios
-    df_ood['model_label'] = df_ood['model'].str.replace('_', '-')
+    df_ood['model_label'] = df_ood['model'].apply(format_model_name)
 
     # 2. Balanced Figure Size - 8 wide, 6 tall is a standard "sweet spot" for papers
     plt.figure(figsize=(8, 6)) 
@@ -109,16 +108,29 @@ if __name__ == "__main__":
 
     df_all = pd.read_csv(args.results)
 
+    df_ieee = df_all[df_all['testing_grid'] == 'IEEE_European_LV']
+    if not df_ieee.empty:
+        print("\nMAX Inference and Training Times on IEEE_European_LV:")
+        for model in df_ieee['model'].unique():
+            df_model = df_ieee[df_ieee['model'] == model]
+            inf_time = df_model['inference_time_ms'].max()
+            train_time = df_model['train_time'].max()
+            print(f"    {format_model_name(model)}: Inference Time = {inf_time:.4f} ms, Training Time = {train_time:.4f} seconds")
+
+    # Skip this grid in plots
+    df_all = df_all[df_all['testing_grid'] != 'IEEE_European_LV']
+
     # Get mean and std of 'train_time' grouped by model
     grouped = df_all.groupby('model')['train_time'].agg(['mean', 'std']).reset_index()
 
     # Print out the results using mean +- std format, with valued rounded to 2 decimal places
+    print("\nMean and Standard Deviation of Training Times:")
     for index, row in grouped.iterrows():
         mean_time = round(row['mean'], 2)
         std_time = round(row['std'], 2)
-        print(f"{row['model']}: {mean_time} +- {std_time} seconds")
+        print(f"    {row['model']}: {mean_time} +- {std_time} seconds")
 
-    grid_to_num_noodes = {
+    grid_to_num_nodes = {
         'Kerber_Dorfnetz': 116,
         '1-LV-rural1--1-no_sw': 14,
         '1-LV-rural2--1-no_sw': 96,
@@ -128,17 +140,8 @@ if __name__ == "__main__":
         '1-LV-urban6--1-no_sw': 58,
     }
 
-    for testing_grid in grid_to_num_noodes.keys():
-        ldf_inference_time = df_all.loc[(df_all['model'] == 'LinDistFlow') & (df_all['testing_grid'] == testing_grid), 'inference_time_ms'].values[0]
-        # Add ldf inference time to XGB_Absolute, XGB_Parent, XGB_LDF models for the same testing grid, because LDF is done before the XGB inference and is part of the total inference time for those models.
-        for model in ['XGB_Absolute', 'XGB_Parent', 'XGB_LDF']:
-            df_all.loc[(df_all['model'] == model) & (df_all['testing_grid'] == testing_grid), 'inference_time_ms'] += ldf_inference_time
-
-    # Skip LinDistFlow in plots
-    df_all = df_all[df_all['model'] != 'LinDistFlow']
-
     # Make plots
-    plot_inference_time_scaling(df_all, grid_to_num_noodes, save=args.save)
+    plot_inference_time_scaling(df_all, grid_to_num_nodes, save=args.save)
     plot_vm_boxplot(df_all, metric='rmse_vm_pu', save=args.save)
     plot_vm_boxplot(df_all, metric='rmse_va_degree', save=args.save)
 

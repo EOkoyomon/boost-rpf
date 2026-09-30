@@ -653,6 +653,15 @@ def plot_error_accumulation(model, loader_test):
         apply_styling(ax2, means_va, 'Voltage Angle RMSE', 'RMSE (degree)')
         ax2.set_xlabel('Distance from Slack', fontsize=12)
 
+        vms = []
+        for val in errors_vm.values():
+            vms.extend(val)
+        vas = []
+        for val in errors_va.values():
+            vas.extend(val)
+        print("RMSE VM min/max:", min(vms), max(vms))
+        print("RMSE VA min/max:", min(vas), max(vas))
+
         plt.tight_layout()
         # plt.savefig('error_accumulation.pdf', format="pdf", dpi=300)
         plt.show()
